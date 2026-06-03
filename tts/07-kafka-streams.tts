@@ -1,0 +1,187 @@
+Kafka streams.
+
+What is covered. This notebook walks through the Kafka streams pitch as a library rather than a framework, the three core abstractions of k-stream, k-table, and global k-table, the topology that becomes your runtime, the threading model with stream threads and tasks, state stores backed by changelog topics, the stateless operations, the stateful aggregations, the four kinds of join, windowing across tumbling, hopping, sliding, and session, event time versus processing time and how grace periods handle late records, the exactly-once v two processing guarantee, interactive queries that expose your state stores as a read A-P-I, a brief mention of ksqlDB as the sql layer on top, and a list of common gotchas.
+
+A note before we start. All code examples are in java. Kafka streams is a java-virtual-machine-only library. The Python confluent-kafka client cannot consume from or produce to a streams topology directly.
+
+The pitch — a library, not a framework.
+
+Stream processing usually means standing up a cluster. Flink, Spark streaming, Storm. Each has its own scheduler, its own deployment model, its own way of failing in production at three a m.
+
+Kafka streams is just a jar. You add it to a regular java-virtual-machine application — a Spring Boot service, a Micronaut app, whatever — build a topology in your main method, call streams dot start, and you have a stream processor running inside your service, scaled by running more copies of your service, deployed by your existing deploy pipeline. No new cluster, no new scheduler, no new on-call rotation.
+
+What you get for free. State that survives failures — local rocks-d-b stores, durably backed by Kafka changelog topics. Lose an instance, another picks up the partitions and re-hydrates state from the changelog. Exactly-once — end-to-end exactly-once processing through the consume-process-produce pattern, built on the transactional producer from notebook two. And scaling — add more application instances, and Kafka's consumer-group rebalance moves partitions and their state around. Same horizontal-scaling story as a regular consumer, just with state attached.
+
+When to reach for streams over a plain consumer. Anything stateful — joining two streams, aggregating, windowing, deduplicating across records. When not to. Stateless transforms — a plain consumer is simpler — or anything cross-language. Streams is java-virtual-machine only. Python and Go services should write a regular consumer, or use a different engine.
+
+A brief word on streams versus flink. Flink is more powerful, has richer windowing semantics, and runs as its own cluster — better for complex complex-event-processing, multi-stream joins with elaborate watermarks, and batch-and-stream unified work. Streams is good enough for the vast majority of stream-processing-in-a-microservice use cases, and the operational cost is zero compared to flink. Most teams pick streams first and only graduate to flink when they hit a limit.
+
+The three abstractions.
+
+Kafka streams models a topic in three different ways. Picking the right one for each topic is most of the design work.
+
+K-stream is an unbounded sequence of independent records. Each record stands alone. The natural shape for event streams — payments dot created, clicks, orders dot shipped. Two records with the same key are two distinct events, not an update.
+
+K-table is a continuously updated table. Records with the same key replace each other. Tombstones — null values — delete keys. The natural shape for state — users dot profile, inventory dot level. Reads of a k-table give you the current value per key, materialized in a local state store. Built directly on top of compacted topics from notebook four.
+
+Global k-table is a k-table replicated to every instance in full. Every application instance holds a complete copy. Expensive for memory but eliminates the co-partitioning requirement on joins, covered shortly. Used for small dimension tables — country codes, feature flags, currency conversion rates.
+
+The mental shortcut. Is this what happened or what is? K-stream for what happened, k-table for what is.
+
+Topology — the runtime as a D-A-G.
+
+Your code constructs a topology — a directed graph of processor nodes connected by edges. Source nodes read from Kafka topics. Sink nodes write back. And processor nodes in between do your filters, joins, aggregations.
+
+Two things to keep in mind. First, stream-dot-print and friends are convenience sinks, not debug output. They appear as nodes in the topology and run on every record. Second, inspect the topology before you ship it. Calling streams-dot-topology-dot-describe prints a text rendering of every node and the sub-topologies they belong to. A surprising topology is almost always a bug — joins that should be co-partitioned but are not, repartitions you did not expect, missing materializations.
+
+The threading model.
+
+A streams application contains stream threads, tasks, and sub-topologies.
+
+Stream threads are configured through num stream threads. Each is a java-virtual-machine thread that runs one or more tasks. Default is one.
+
+Tasks are one per sub-topology and source-partition pair. A task owns a fixed set of partitions across all source topics it touches, plus its slice of every state store.
+
+Sub-topologies are independent units. Streams splits your topology into them wherever a repartition happens. Tasks in different sub-topologies are independent of each other.
+
+The scaling rule. Maximum parallelism equals the number of partitions of your source topics. A topology reading from a twelve-partition topic can run at most twelve tasks. Spread those across instances and threads however you like — one instance times twelve threads, twelve instances times one thread, six times two, all equivalent. Adding a thirteenth thread or instance gets you one idle worker.
+
+Add more instances of your application, and rebalance moves tasks and their state to balance load. Same model as a consumer group, with the extra wrinkle that state stores migrate too.
+
+State stores and changelog topics.
+
+Stateful operations — count, reduce, aggregate, joins — need somewhere to keep state per key. Streams uses a local state store — by default a rocks-d-b instance on the task's host — and durably backs every change to a changelog topic in Kafka.
+
+The flow is this. Process a record. Update the local store. Append the change to the changelog topic. And reads serve from the local store, which is fast.
+
+Two things you should know. First, changelog topics are auto-created, named application-i-d dash store-name dash changelog, and must be compacted so they hold only the latest value per key. Streams configures this automatically when it creates them. Second, on recovery, streams replays the changelog into a fresh local store. A new instance picking up a task reads its slice of the changelog from offset zero to the current end, rebuilding the rocks-d-b state, before processing any new records. For a large state store, recovery can take minutes. Which is why standby replicas — set through num standby replicas — exist. Hot copies of the state on other instances, kept warm by tailing the changelog continuously.
+
+Standby replicas are the standard production tuning knob for state-heavy apps. Setting num standby replicas to one means every task has a warm copy elsewhere. Failover is seconds, not minutes.
+
+Setup — the dependencies.
+
+The maven coordinates for a streams application are the kafka-streams artifact from the apache kafka group. Optionally, the kafka-streams-avro-serde artifact from Confluent for schema registry integration. The notebook lists the coordinates.
+
+Minimum configuration. The application I-D is the analogue of group I-D for a consumer. It is the identity streams uses for consumer-group membership, state-store changelog naming, internal topic naming, and exactly-once transaction coordination. Pick it carefully and never change it casually.
+
+Set application I-D. Set the bootstrap servers. Set the default key serializer-deserializer to a string serdes. Set the default value serdes similarly. Set processing guarantee to exactly-once v two. And set num standby replicas to one.
+
+Hello streams — count payments per customer.
+
+Read from payments dot created, group by customer I-D, count per customer, write the running count to payment-counts. The whole thing is ten lines of topology code.
+
+Here is what is happening. Builder dot stream declares a source node — a k-stream reading from payments dot created. Dot group-by-key does not shuffle. It asserts that records are already grouped by this key. If we had called dot group-by with a different key extractor, streams would have inserted a repartition topic — a Kafka topic — to re-shuffle records by the new key before the aggregation. Repartitions are expensive. Design your producer keys to avoid them where you can. Dot count with materialized-as materializes the running count into a state store. The materialized parameter is what makes the store queryable by name, which we will see in interactive queries below. Finally, counts dot to-stream dot to converts the changelog of updates back into a stream and sinks it to a topic, so downstream services can subscribe to live counts.
+
+Run two copies of this application against the same application I-D, and they automatically share the work. The consumer-group rebalance assigns half the input partitions to each, and each holds half the state.
+
+Stateless operations.
+
+The cheap operations. They do not materialize anything, they do not repartition, they run inline per record.
+
+Filter keeps records that pass the predicate. Filter-not is the inverse. Map transforms key and value — but it changes the key, which forces a repartition before the next stateful op. Map-values transforms value only, with no repartition. Flat-map can produce zero, one, or many output records per input. Flat-map-values does the same but is key-preserving. Select-key computes a new key, which forces a repartition. Branch or split divides a stream into multiple based on predicates. And peek is a side-effect call, useful for logging or metrics, without changing the stream.
+
+The watch-out. Anything that changes the key forces a repartition. A repartition writes every record to a hidden internal topic and re-reads from it on the other side, doubling the network and storage cost for that segment of the topology. Prefer map-values over map, and prefer keying records correctly at the producer.
+
+Stateful aggregations.
+
+Group-by-key or group-by returns a k-grouped-stream. Then you pick an aggregation. Count gives a running count per key. Reduce combines same-typed values — running sum, running max, and so on. Aggregate is the most general — when output type differs from input. You initialize an accumulator, then fold each value in.
+
+Each call updates the local state store and appends a record to the changelog topic. Recovery — or a new instance taking over — replays the changelog into a fresh store.
+
+Joins.
+
+Streams supports four kinds of join, and the shape decides what semantics you get.
+
+The first is k-stream to k-stream, which is a windowed join. Two event streams. The join is windowed — these two events happened within N seconds of each other. Used for things like impression joined with click within five minutes.
+
+The second is k-stream to k-table, which is a lookup join. An event stream joined against a table for enrichment. Non-windowed and asymmetric. Every event is enriched with the current table value for its key.
+
+The third is k-table to k-table, which is a changelog join. Two tables join into a third whose value updates whenever either side changes. Used to combine state from two sources.
+
+The fourth is k-stream or k-table joined with a global k-table — a broadcast lookup. Like the k-table lookup, but the right side is a global k-table — fully replicated, no co-partitioning required, and the join key does not have to match the stream key.
+
+The co-partitioning rule. For non-global joins, both sides must have the same number of partitions and the same partitioner. If they do not, the join silently produces wrong results — records that should match end up on different tasks. The standard fix is to produce both sides through the same partitioner with the same partition count, or insert a select-key plus repartition explicitly.
+
+Foreign-key joins, available only between two k-tables, are a newer feature. They let you join two tables on a foreign key extracted from one side's value, without co-partitioning. Implemented through internal repartition topics behind the scenes. Useful for the classic orders dot customer-i-d joined with customers dot i-d shape.
+
+Windowing.
+
+Aggregations on infinite streams need a bound. Windowing groups records into finite buckets in time. Four kinds.
+
+Tumbling windows are fixed-size and non-overlapping. How many payments per minute, exactly.
+
+Hopping windows are fixed-size and overlapping. Five-minute counts, recomputed every minute. Defined by size plus advance.
+
+Sliding windows are defined by a maximum time difference between records — used in k-stream to k-stream joins.
+
+Session windows are variable-length, defined by a gap of inactivity. All clicks within thirty minutes of each other form a session.
+
+The key on a windowed k-table is wrapped in a windowed-of-key — same logical key, plus the window's start and end timestamps. When you sink it to a topic, the output key encodes both.
+
+Time semantics.
+
+The clock that matters for stream processing is the event time — when the event actually happened — not the processing time — when streams handles it. A record produced an hour ago and just consumed should be windowed by its hour-ago timestamp, not by now.
+
+Streams picks the timestamp through a configurable timestamp extractor. Fail-on-invalid-timestamp, the default, uses the Kafka record timestamp — the producer's create-time. Fail on missing or invalid. Use-partition-time-on-invalid-timestamp is the same, with a graceful fallback. Wall-clock-timestamp-extractor uses system-current-time-millis — processing time, useful only when you genuinely do not have event time. And custom extractors pull the timestamp from inside the record value.
+
+Once you have event time, out-of-order records become the question. A record with timestamp twelve oh one arriving at processing time twelve oh five is late. Two knobs handle that.
+
+Window grace period — set through time-windows of size and grace — is how long after a window closes streams will still accept records into it. Records arriving after the grace period are dropped and counted in a metric. The default is zero in modern Kafka — explicit grace is opt-in.
+
+Suppress emits only the final result of a window after grace expires. Without suppress, every record inside the window emits an updated aggregate downstream. With suppress, only the closed window's final value emits.
+
+Exactly-once processing.
+
+Set one config — processing guarantee equals exactly-once v two.
+
+What that turns on. A transactional producer with a transactional I-D derived from application I-D plus task I-D. A consumer with isolation level read-committed, so the topology sees only committed records from upstream. And an atomic offset commit plus output produce plus state-store changelog write, all in a single transaction. Either all three commit or none. No partial state on crash.
+
+Exactly-once v two, available since Kafka two point six, is much cheaper than the original exactly-once. One transaction per stream thread per commit interval instead of one per task. Throughput is close to at-least-once. Use v two unless you are stuck on an old broker — exactly-once v two requires brokers on two point five or newer.
+
+The cost is a small latency tax. Each record waits for its transaction to commit before going downstream. Commit interval defaults to one hundred milliseconds under exactly-once. For most analytics-shaped pipelines, it is a great trade.
+
+Interactive queries.
+
+Streams state stores are normally hidden inside the topology. Interactive queries expose them. From the same application instance, you can query the current value of any materialized state store by name.
+
+In an H-T-T-P endpoint somewhere in your application, you fetch the store handle through streams dot store with store-query-parameters from-name-and-type, then call store dot get with the key to get the current value.
+
+The wrinkle. State is distributed across instances. Customer CUST-zero-zero-zero-one lives on whichever task owns the partition that hashes that key. If your H-T-T-P request hits a different instance, the store on that instance does not have the key.
+
+The standard pattern is three steps. First, the receiving instance asks the metadata layer — streams dot query-metadata-for-key — which instance owns the key. Second, if it is the local instance, query directly. Third, otherwise, forward the H-T-T-P request to the owning instance, whose host and port the metadata layer hands back.
+
+Interactive queries turn a streams app into a low-latency read A-P-I on top of your event streams, without needing a separate database. Excellent fit for serving dashboards, customer-facing A-P-Is, and any give-me-the-latest-state workload.
+
+KsqlDB — the sql layer.
+
+Brief mention so you can recognize it. KsqlDB is a separate server and product from Confluent that compiles sql into Kafka streams topologies behind the scenes. You write create stream, create table, and select statements. The execution model underneath is the same as streams, just sql on top.
+
+Out of scope for this curriculum. When you would reach for it. When the user writing the pipeline is more comfortable in sql than java, or when the pipeline is straightforward enough that java would be overkill. When you would reach for streams directly. Anything custom — custom serdes, complex aggregations, integration with other java-virtual-machine libraries.
+
+Common gotchas.
+
+Changing application I-D. It is the identity for everything — consumer group, changelog topics, internal repartition topics, exactly-once transactions. Changing it makes streams treat your app as brand new. State is rebuilt from scratch. Consumer group offsets are gone. You start over. Treat it as immutable.
+
+Forgetting to set the value serdes when materializing. Aggregations default to the default value serdes, which is often the wrong type. For example, you are counting into a long but the default is string. Explicit materialized dot with saves debugging.
+
+Unintended repartitions. Select-key, map with a new key, and group-by with a new key all force a repartition. Inspect with topology dot describe. If you see a repartition node you did not intend, fix the key at the producer or shift the operation later.
+
+Joining streams that are not co-partitioned. Silent wrong answers, not loud errors. Verify partition count and partitioner match.
+
+Windowed aggregations without suppress when downstream expects the final result. Without it, every record inside the window produces an interim emit downstream.
+
+State stores larger than disk. Rocks-d-b stores can grow large. Out of disk takes the whole instance down. Monitor disk usage. Reduce store size through time-to-live for windowed stores, or move to a smaller key-value shape.
+
+Commit interval ignored under exactly-once v two. Exactly-once v two commits at every commit interval, default one hundred milliseconds. Cranking this up gives you bigger transactions and higher throughput at the cost of higher end-to-end latency.
+
+Running streams against a topic Kafka connect also writes to with inconsistent serdes. Same lesson as notebook six. One converter, one format, end to end.
+
+And standby replicas not configured. Default is zero. With zero standbys, an instance failure means the surviving task rebuilds state from offset zero of the changelog before resuming processing. For any state-heavy app, set num standby replicas to one or higher.
+
+What is next.
+
+Producers, consumers, topic design, schemas, connect, and streams — that is the data plane. You can build any event-driven system from here.
+
+Notebook eight closes the curriculum with operations, security, and performance tuning. Java management extensions metrics that matter, ssl, sasl, ay-see-els, the broker tuning knobs you will actually touch, partition reassignment, monitoring dashboards, and the operational checklist for a production cluster.
+
+After eight, the curriculum is complete, and the loop from empty topic to production stream-processing system is closed.
