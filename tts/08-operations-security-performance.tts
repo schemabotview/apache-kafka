@@ -1,0 +1,247 @@
+Operations, security, and performance tuning.
+
+What is covered. This notebook walks through monitoring through java management extensions and the handful of metrics that actually matter, consumer lag as the most important client metric, cluster admin operations like describing the cluster and reassigning partitions, the rolling upgrade procedure, the four layers of security, transport layer security for wire encryption, the four sasl mechanisms and when to pick which, access control lists, quotas to keep one tenant from taking down the cluster, performance tuning for producers, consumers, and brokers, capacity planning heuristics, and the production checklist.
+
+Monitoring.
+
+Every Kafka broker exposes metrics over java management extensions — usually shortened to j-m-x — on a configurable port. The metric surface is enormous, hundreds of managed beans, but the operational reality is that a small set of metrics tell you ninety percent of what you need to know. You get them out of j-m-x one of three ways.
+
+The j-m-x exporter for prometheus is the standard. Run the j-m-x exporter as a java agent inside each broker, and it scrapes managed beans and exposes them at slash metrics. Prometheus scrapes that, and grafana renders it.
+
+Confluent Control Center, or Confluent Cloud dashboards, is the same data packaged as a commercial U-I.
+
+J-console or j-m-x-term is interactive — useful for debugging one broker. Not a monitoring strategy.
+
+The same approach applies for clients. Every Kafka producer, consumer, streams app, and connect worker exposes j-m-x metrics too. Scrape them all.
+
+One alert always. Anyone running Kafka in production should page on under-replicated partitions greater than zero, sustained. That is the cluster telling you a broker is behind or down.
+
+The metrics that actually matter.
+
+Memorize this short list. Everything else is supporting evidence.
+
+For broker health, the metrics are under-replicated partitions, offline partitions count, active controller count which must sum to one across the cluster, request handler average idle percent which signals see-pee-you saturation when it drops below thirty percent, network processor average idle percent which signals network saturation likewise, bytes in and bytes out per second for capacity planning, messages in per second for the same, leader election rate which should be near zero outside of failures, and unclean leader elections per second which means data loss and pages immediately when above zero.
+
+For replication health, watch in-sync-replica shrinks per second, in-sync-replica expands per second, and the fetcher lag metrics per partition.
+
+For the client side, watch record send rate and record error rate for producers, request latency average and record queue time average for producer latency and back-pressure, records lag and records lag max for consumers — the most important client metric — and commit rate and commit latency for consumer offset commits.
+
+The honest production dashboard. Under-replicated partitions, offline partitions, request-handler idle percent, network-handler idle percent, in-sync-replica shrinks per second, unclean leader elections, and per-consumer-group lag. That is the boring dashboard that catches the loud failures.
+
+Consumer lag.
+
+Consumer lag is the difference between the latest offset in a partition and the consumer group's committed offset for that partition. It is the answer to is this consumer keeping up?
+
+Lag at zero, stable, means the consumer is keeping up. Lag stable but nonzero means the consumer is steady but offset behind. Sometimes desirable, for batch consumers. For real-time pipelines, undesirable. Lag growing means the consumer is falling behind. Scale up consumers, or upstream is in a burst.
+
+In the demo cell, we compute lag for every consumer group from python. The same shape works against any cluster. Give it bootstrap servers and read. We list every consumer group on the cluster, fetch committed offsets for each group, and for each topic-and-partition fetch the current end offset and compute lag as end minus committed.
+
+Describing the cluster.
+
+Admin client dot describe cluster gives you the controller broker, every broker in the cluster, and the cluster I-D — the basis for every operational tool that talks to Kafka.
+
+Partition reassignment.
+
+Adding or removing brokers does not automatically rebalance existing partitions. The new broker sits there with no partitions until you move some onto it. Partition reassignment is the mechanism. Three steps. Generate a plan describing which partitions to move and to which brokers. Submit the plan, and the controller orchestrates moves in the background — each follower replica catches up before the old one is dropped. Then verify completion.
+
+The standard command-line tool is kafka-reassign-partitions. You first generate a balanced plan for the chosen topics across the chosen brokers, then execute the plan optionally throttled to limit replication bandwidth, then watch progress through the verify subcommand.
+
+Use the throttle. Without it, replication can saturate the network and starve client traffic. Tune the throttle to leave headroom for your real workload.
+
+Confluent's self-balancing clusters, a commercial offering, and the open-source Cruise Control project, do this automatically — continuously evaluating cluster balance and moving partitions in the background. For a self-managed cluster of any real size, one of those is worth the integration cost.
+
+Rolling upgrades.
+
+Upgrade brokers one at a time. The protocol is designed for it. Six steps.
+
+First, set inter broker protocol version and log message format version to your current Kafka version on every broker, if not already pinned. This freezes the wire protocol so newer brokers downgrade to it when talking to old ones.
+
+Second, stop one broker, upgrade its software, and start it. Replicas it owned go under-replicated. The cluster keeps running.
+
+Third, wait for under-replicated partitions to return to zero before moving to the next broker. Do not proceed if replication is still catching up.
+
+Fourth, repeat for every broker.
+
+Fifth, bump inter broker protocol version to the new version. This is the cutover. Once all brokers are on the new version and the protocol is bumped, the new protocol features become active. Roll restart one more time to apply.
+
+Sixth, optionally and in a separate cycle, bump log message format version once all producers are on the new version too.
+
+The pattern. Software upgrade and protocol cutover are separate steps. And you wait for replication to be healthy between every broker.
+
+The four layers of security.
+
+Production Kafka security is four independent concerns. Pick a position on each.
+
+Encryption in transit protects against anyone tapping the network. The mechanism is transport layer security on broker listeners.
+
+Authentication answers who is this client? The mechanism is sasl with plain, scram, or oauthbearer, or mutual transport layer security.
+
+Authorization answers can this client do this thing? The mechanism is access control lists.
+
+Encryption at rest protects against an attacker with disk access. The mechanism is disk-level encryption — l-u-k-s on linux, e-b-s encryption in AWS. Kafka does not encrypt its own log files.
+
+You can mix and match. The common production posture is transport layer security everywhere, sasl scram for app clients, mutual t-l-s for broker-to-broker, access control lists deny-by-default. Cloud managed offerings like M-S-K and Confluent Cloud handle most of this configuration for you. Self-managed clusters need it set up explicitly.
+
+Transport layer security.
+
+Transport layer security terminates on the broker listener. It is configured per listener through the security protocol setting. Four values.
+
+Plaintext means no t-l-s and no auth. Local development only. Ssl means t-l-s encryption with optional client cert for authentication — mutual t-l-s. Sasl plaintext means sasl auth without encryption. Internal networks only. And sasl ssl means sasl auth over t-l-s. The standard production choice.
+
+The broker config sets the listeners, the security protocol map, the inter broker listener name, and ssl keystore and truststore paths and passwords. Set ssl client auth to required if using mutual t-l-s for client auth.
+
+The client config sets bootstrap servers, security protocol equal to sasl ssl, the path to the ssl certificate authority, the sasl mechanism — for example scram-sha five twelve — the sasl username, and the sasl password from a secret store.
+
+Multiple listeners are normal. Brokers often expose an internal listener — plaintext or ssl, for cluster-internal traffic — and an external listener — sasl ssl, for clients. Configure advertised listeners so clients connect on the right one.
+
+Sasl.
+
+Four sasl mechanisms commonly used with Kafka.
+
+Plain uses a username plus password in plaintext, encrypted by t-l-s. Use it only over t-l-s, with a static credential store. The simplest option.
+
+Scram-sha two fifty-six and scram-sha five twelve use a username plus password, salted and hashed. The recommended username-password mechanism. Credentials are stored in a managed Kafka store or an external store.
+
+Oauthbearer uses an oidc token from an identity provider like okta, auth-zero, or azure ad. Use for service-to-service auth in oidc environments. Ties Kafka access to your identity provider.
+
+Mutual t-l-s uses a client certificate. Strong identity bound to certificate issuance. Common in kubernetes service-mesh deployments.
+
+The default recommendation for a self-managed cluster is scram-sha five twelve over t-l-s, with credentials provisioned by your secrets system. For oidc-native organizations, oauthbearer is cleaner. Mutual t-l-s shines when certificate management is already a solved problem — for example, when you already have spiffy or spire deployed.
+
+Once a client authenticates, Kafka maps it to a principal — typically user colon c-n equals payments-producer for mutual t-l-s, or user colon payments-producer for sasl. Principals are what access control lists are written against.
+
+Access control lists.
+
+An access control list is a tuple. Principal, resource, operation, and permission. Kafka resources are typed. The five resource types are topic, group meaning consumer group, cluster, transactional I-D, and delegation token. Each has its own set of applicable operations — read, write, create, delete, alter, describe, describe configs, alter configs, cluster action, and idempotent write — depending on the resource.
+
+Deny by default. Set allow everyone if no acl found equals false on the broker, then write explicit allow rules per principal. Anything not in the matrix is denied.
+
+The command-line tool is kafka-acls. It supports add, list, and remove operations against principals and resources. The same operations exist on admin client dot create acls, describe acls, and delete acls — useful for managing access control lists as code from continuous integration.
+
+Quotas.
+
+Quotas limit per-client throughput. Without them, one runaway producer — or one runaway test — can saturate broker network or disk and degrade everyone.
+
+Three quota dimensions, set per user, client I-D, internet protocol address, or combinations. Produce rate is bytes per second a producer can write. Exceed it, and the broker delays responses as back-pressure. Fetch rate is bytes per second a consumer can read. Request rate is the see-pee-you time the broker spends on this client, as a percentage of one network or i-o thread. And connection rate is new connections per second from one internet protocol address. Defends against connection floods.
+
+Quotas don't reject requests. They slow them down. The client sees increased request latency, and the broker stays healthy. In a multi-tenant cluster, set per-user default quotas at provisioning time.
+
+Performance tuning, producers.
+
+Most of this was covered in notebook two. Here it is in tuning-knob form.
+
+For throughput, raise linger milliseconds — default zero, try five to twenty. Raise batch size — default sixteen kilobytes, try sixty-four to two hundred fifty-six kilobytes. Set compression type to zstd. Raise buffer memory if you see queue time growing.
+
+For latency, keep linger milliseconds at zero, prefer fewer in-flight requests, and keep records small.
+
+For durability, set acks all, set enable idempotence true — both defaults since three point zero — and set broker-side minimum in-sync replicas to two. Combined with replication factor three, this is the standard production recipe.
+
+Almost never tune retries or request timeout. Trust delivery timeout as the single bound on retry behavior.
+
+Performance tuning, consumers.
+
+For throughput, raise fetch minimum bytes — default one, try sixty-four kilobytes — and fetch maximum wait milliseconds to batch more records per fetch. Raise maximum poll records — default five hundred — if your handler is fast enough.
+
+For latency, keep fetch minimum bytes at one and fetch maximum wait milliseconds low.
+
+For correctness, set enable auto commit false and manually commit after processing — the at-least-once recipe from notebook three.
+
+For rebalances, set partition assignment strategy to cooperative-sticky and set group instance I-D to the pod or host name. Rolling restarts stop causing rebalance storms.
+
+The most common consumer problem is not broker-side. It is the handler being slow. Watch maximum poll interval milliseconds. Anything close to its bound — five minutes by default — means your handler is the bottleneck.
+
+Performance tuning, brokers.
+
+Where the real money is. A short list of the knobs that matter.
+
+Operating-system page cache is your storage. Kafka relies on the kernel page cache for read speed. Give the broker box generous ram, and do not set a huge java virtual machine heap to consume it. Java virtual machine heap on broker should be six to eight gigabytes — plenty. The rest of physical ram should belong to the page cache.
+
+Num network threads, default three, handle network input-output. Scale roughly with client connection count.
+
+Num i-o threads, default eight, handle disk reads and writes. Scale roughly with disk count and partition activity.
+
+Num replica fetchers, default one, are followers fetching from leaders. Raise to four to eight for clusters with many partitions or wide replication.
+
+Log flush settings — almost never set. Kafka deliberately relies on the kernel to flush dirty pages on its own schedule. Forcing synchronous flushes hurts throughput dramatically with no durability gain. Replication, not fsync, is your durability story.
+
+Disks. Prefer one disk per log directories entry. Kafka spreads partitions across log directories. One drive each lets you scale by adding drives, with no raid overhead. Solid-state drives are nice. For sequential workloads, well-tuned spinning rust is also fine.
+
+Java virtual machine. G-one g-c is the default and works well. Z-g-c for very large heaps, but most brokers do not need that.
+
+And socket send buffer bytes and socket receive buffer bytes — default one hundred kilobytes. Bump on high-latency or high-throughput links.
+
+Capacity planning.
+
+Back-of-envelope numbers to start from. Validate on your hardware.
+
+Per broker, on a commodity sixteen-core, sixty-four-gigabyte box with N-V-M-E solid-state drives. Sustained throughput is one hundred to five hundred megabytes per second ingress, and two hundred megabytes to one gigabyte per second egress — consumers replaying from cold storage skew this. Partition count is two thousand to four thousand partitions per broker before the metadata burden hurts. K-raft pushes this much higher — tens of thousands — but file-handle and replication overhead still grow linearly. Connection count is in the thousands.
+
+Cluster sizing math for a target throughput T megabytes per second with replication factor three. Broker ingress required equals T. Replication multiplies inside the cluster but ingress is T. Broker egress required equals T times consumer groups plus replication factor minus one. And brokers minimum equals the maximum of broker ingress required and broker egress required, divided by per-broker throughput.
+
+Add thirty to fifty percent headroom for failures. You need spare capacity to absorb the lost broker's traffic during a node failure.
+
+Disk sizing. Multiply target throughput by retention to get raw disk per broker. Multiply by replication factor for cluster-wide. Divide by broker count for per-broker. Compression cuts this by two to ten times. Tiered storage from notebook four decouples disk sizing from retention entirely.
+
+The production checklist.
+
+Print this and pin it next to the deployment runbook. The notebook lists the full set, in six groups — cluster, topics, producers, consumers, schemas, security, and operations. I will summarize the highlights.
+
+For the cluster, at least three brokers in k-raft mode, broker rack set per broker for availability-zone awareness, multiple listeners, unclean leader election disabled, auto-create topics disabled, j-m-x metrics scraped into prometheus with a dashboard for under-replicated, offline, unclean elections, request idle percent, and consumer lag. Alerts on under-replicated greater than zero sustained, offline greater than zero, unclean elections greater than zero, and controller count not equal to one.
+
+For topics, replication factor three, minimum in-sync replicas two, partition count sized for peak consumer parallelism plus headroom, cleanup policy chosen deliberately, retention set, and a naming convention enforced.
+
+For producers, acks all and enable idempotence true — both defaults since three point zero — compression type zstd, linger of at least five milliseconds, delivery callbacks and flush on shutdown. If using exactly-once, a transactional I-D set and stable across restarts.
+
+For consumers, enable auto commit false with manual commit after processing, partition assignment strategy cooperative-sticky, group instance I-D set for static membership, and a per-group lag dashboard with an alert.
+
+For schemas, schema registry highly available, the underscore schemas topic on replication factor three, compatibility mode set per subject — default backward — and one schema registry per environment.
+
+For security, transport layer security on the external listener and ideally on the internal too, a sasl mechanism chosen, allow everyone if no acl found set to false to deny by default, per-principal access control lists as code, and default quotas at provisioning time.
+
+For operations, a backup story — mirror-maker two to a disaster-recovery cluster, or tiered storage — a tested rolling-upgrade runbook, a partition reassignment script with throttle defaults, Cruise Control or equivalent for ongoing balance, and an incident playbook for under-replicated, offline, and controller flapping.
+
+Common gotchas.
+
+Unclean leader election enable set to true to avoid downtime. Silent data loss. Already covered in notebook four. Worth saying again.
+
+Huge java virtual machine heap on brokers. Robs the page cache. Six to eight gigabytes is plenty. Let physical ram serve disk reads.
+
+Auto-create topics on in production. Typos in client code create garbage topics. Disable it.
+
+No quotas in multi-tenant clusters. One bad tenant degrades all others. Set defaults at provisioning.
+
+Single-availability-zone deployment. Survives broker failure but not zone failure. Three zones with broker rack set is the standard.
+
+No monitoring on schema registry or connect. Both can fail independently of brokers. They need their own dashboards and alerts.
+
+Partition reassignment without a throttle. Replication saturates the network and starves client traffic.
+
+Forgetting that minimum in-sync replicas is broker-level and per-topic. Setting it broker-wide does not override a topic that was created with a lower value. Set both.
+
+Trusting acks all without minimum in-sync replicas. When the in-sync set shrinks to one, acks all collapses to acks one silently. Always pair them.
+
+Closing the loop.
+
+The curriculum is complete. Eight notebooks, end to end.
+
+One — foundations and architecture. Brokers, partitions, offsets, replication, k-raft.
+
+Two — producers. Keys, partitioner, acks, idempotence, transactions, batching, compression.
+
+Three — consumers and consumer groups. Poll loop, rebalance, commits, isolation, static membership.
+
+Four — topics, partitions, and storage. Sizing, retention, compaction, segments, the durability recipe.
+
+Five — schema registry and serialization. Avro, protobuf, json schema, the wire format, compatibility modes.
+
+Six — Kafka connect. Source and sink connectors, the rest A-P-I, single message transforms, dead-letter queues.
+
+Seven — Kafka streams. K-stream and k-table, topology, state stores, joins, windowing, exactly-once v two.
+
+Eight — operations, security, and performance tuning. J-m-x, lag, access control lists, transport layer security, sasl, the production checklist.
+
+Together they cover the surface the Confluent Certified Developer for Apache Kafka exam tests, and more usefully, the surface a real team needs to run Kafka in production.
+
+From here, the next steps are usually one of two things. Deepen one area — debezium and change-data-capture patterns, the Kafka streams processor A-P-I, ksqlDB, or the broker internals including the controller, the log layer, and k-raft's metadata topic. Or build something. Pick a small domain — a payment pipeline, a clickstream aggregator, an order fulfillment workflow — and wire it end to end with what you have learned.
+
+The certification studies for itself once the eight notebooks land. The actual skill is the muscle memory of designing topics, picking serdes, and keeping the production cluster boring.
