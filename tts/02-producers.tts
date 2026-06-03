@@ -1,0 +1,157 @@
+Producers.
+
+What is covered. This notebook walks through the shape of a producer record, the architecture behind a single produce call, the default sticky partitioner and how it hashes keys, custom partitioners and when you actually need one, the acks setting as a durability dial, the minimum in-sync replicas setting that pairs with acks all, retries and the delivery timeout, the quiet effect of in-flight requests on ordering, the idempotent producer and what it really fixes, transactions for atomic multi-topic writes, batch size and linger as a throughput dial, the four compression codecs, buffer memory and back-pressure, delivery callbacks, and a list of common gotchas.
+
+The shape of a record.
+
+Every record produced to Kafka is a small envelope with seven fields. The topic is required — that is where the record goes. The value is required, though it can be null — that is the payload, and the broker treats it as opaque bytes. The key is optional, and it decides the partition through a hash, and groups same-key records together. The partition itself is optional — if you set it directly, it overrides the partitioner. The timestamp is optional and defaults to the producer's wall clock, though the broker can be configured to stamp records with their append time instead. Headers are optional, free-form key-value byte pairs, useful for tracing identifiers, schema identifiers, or tenant identifiers. And finally there is the offset, which is assigned by the broker when the record lands and returned in the acknowledgement.
+
+The broker treats both the key and the value as opaque bytes. Serialization is entirely a client concern, covered in notebook five. For now, we use plain strings, and the confluent-kafka client U-T-F-eight encodes them automatically.
+
+Producer architecture.
+
+A produce call does not send a network request. It enqueues the record in an in-memory buffer called the record accumulator, and returns immediately. A background sender thread drains the accumulator, groups records into per-partition batches, and sends each batch as a single produce request.
+
+Three knobs you will tune over and over. First, batch size. The default is sixteen kilobytes. Once a partition's batch reaches this size, the sender ships it immediately. Second, linger, which defaults to zero milliseconds. This is how long the sender waits for more records before shipping a not-yet-full batch. Raising linger trades a few milliseconds of latency for far more throughput, because batches are bigger and the per-request overhead amortizes. Third, buffer memory, which is the total memory the accumulator can hold across all partitions. When the buffer fills, the produce call blocks, or eventually fails, until the sender drains it. That is your built-in back-pressure mechanism.
+
+The takeaway is this. Produce is asynchronous. The record is acknowledged only when the sender's request to the broker returns successfully — which is why you need delivery callbacks.
+
+Setup.
+
+Same broker as notebook one. We will reuse the foundations-demo topic and create a couple of new demo topics along the way.
+
+Delivery callbacks.
+
+Because produce is asynchronous, the only way to learn a record's fate is through a delivery callback. The callback receives an error and a message. If the error is none, the broker acknowledged the write per the acks setting, and the message tells you the partition and offset where it landed. If the error is not none, the write failed after all retries were exhausted — perhaps the payload was too big, perhaps the topic does not exist with auto-create off.
+
+Callbacks fire on the producer's internal thread. You trigger draining of pending callbacks by calling poll with a zero timeout periodically, or by calling flush at the end.
+
+Here is the most common mistake new producers make. Writing produce calls in a loop and then exiting the script without calling flush. The script terminates before the sender thread has shipped anything, and records silently vanish from the buffer. Always flush.
+
+The default partitioner.
+
+When you produce a record, the partitioner decides which partition it lands on. The default confluent-kafka partitioner is consistent-random plus sticky, which mirrors the modern java client behavior.
+
+With a key, the partition is the murmur2 hash of the key modulo the number of partitions. Same key, same partition, always — until the number of partitions changes. The hash is murmur two, the same one the java client uses. So a Python producer and a java producer with the same key choose the same partition. That cross-language consistency is what lets you mix clients on the same topic.
+
+Without a key, the sticky partitioner picks one partition and keeps producing to it until its current batch is full or linger expires. Then it picks another. Earlier clients round-robined per record, which fragmented batches across all partitions and hurt throughput. Sticky concentrates records into bigger batches.
+
+In the demo cell, watch the partition assignment. Same-key records always land together, while no-key records cluster on one partition at a time.
+
+Custom partitioners.
+
+The confluent-kafka client lets you swap the partitioner through configuration. Supported values include consistent-random, which is the default sticky-plus-hash, consistent, which is hash only without sticky behavior, murmur2, murmur2-random, and fnv-one-a. Use these when you need byte-for-byte compatibility with a non-default java partitioner on the same topic.
+
+Writing a fully custom partitioner in Python is not supported by the C client. For that, you drop down to the java client.
+
+In practice, you almost never need a custom partitioner. Two legitimate reasons exist. First, geographic routing — pin records from each region to a dedicated set of partitions so a regional consumer reads only its own slice. Second, tenant isolation — give large tenants their own partitions so one heavy tenant cannot back-pressure the others. Both can usually be solved instead by encoding the routing information into the key and letting the default partitioner do its job. That is almost always the cleaner answer.
+
+The acks setting.
+
+When a producer sends a batch to a partition leader, how long does the broker wait before acknowledging? That is acks, and it has three settings.
+
+Acks equals zero means the leader does not wait at all and acknowledges immediately on the network. Durability is lowest — a record can vanish on broker crash. Latency is lowest.
+
+Acks equals one means the leader waits to write to its local log before acknowledging. Durability is medium — the record survives consumer failure but not leader failure before replication.
+
+Acks equals all, also written as acks equals negative one, means the leader waits for every in-sync replica to acknowledge. Durability is highest — the record survives loss of any single broker, as long as minimum in-sync replicas is at least two.
+
+Two things to remember. First, acks all alone is not enough. If only the leader is in-sync, because all followers fell behind, then acks all collapses to acks one. Pair it with a broker-level minimum in-sync replicas of two or higher, so that a write to a single-replica in-sync set is rejected instead of silently accepted.
+
+Second, acks all is the new default. Since Kafka three point zero, both acks and enable idempotence default to safe values — all, and true. The unsafe settings of acks zero and acks one are now deliberate downgrades, not the path of least resistance.
+
+For anything resembling production, use acks all. Use acks one only for high-volume telemetry where losing a few records on a broker crash is acceptable. Acks zero is for fire-hose use cases where the system as a whole tolerates loss, like clickstream sampling or metrics.
+
+Retries, timeouts, and ordering.
+
+When a produce request fails for a retriable reason — leader election in progress, broker briefly unavailable, network blip — the producer retries automatically. There are four settings that govern this.
+
+Retries is the number of retries. It defaults to a very large number — Integer maximum on the java side. You almost never reduce this. Instead, you bound the total time using the timeout below.
+
+Retry backoff is the delay between retries, defaulting to one hundred milliseconds.
+
+Delivery timeout is the upper bound on the total time from a produce call to delivery success or failure, including all retries. It defaults to one hundred twenty thousand milliseconds — two minutes. This is the right knob to tune. It makes the retry behavior bounded regardless of the retries setting.
+
+Request timeout is the per-request timeout for one broker round-trip, defaulting to thirty seconds. It must be less than delivery timeout.
+
+And there is one config that quietly interacts with ordering. Maximum in-flight requests per connection — defaulting to five — is how many produce requests can be unacknowledged on a single connection at once. Higher is faster. But with a non-idempotent producer and retries enabled, a retried request can land after a later request that succeeded the first time, reordering records within a partition. Setting this to one prevents reordering for non-idempotent producers, but at a steep throughput cost. Idempotent producers, covered next, get up to five safely, because the broker deduplicates and reorders by sequence number on the wire.
+
+The idempotent producer.
+
+Set one config — enable idempotence equals true. That is it.
+
+What it fixes is duplicates caused by producer retries. Before idempotence, a network blip between leader and producer could cause this sequence. The broker writes the record. The acknowledgement is lost in flight. The producer retries. The broker writes the record again. Same record, two offsets.
+
+How it works. The producer is assigned a producer identifier on first connection and stamps every record with a producer-I-D plus sequence number. The broker tracks the last sequence per producer-I-D per partition and rejects duplicates. The same producer-I-D and sequence arriving twice means the second write is silently deduplicated.
+
+What it does not fix. Application-level duplicates — if your code calls produce twice, that is two distinct sequence numbers and two records. Cross-session duplicates — a producer that crashes and restarts gets a new producer-I-D, and the broker has no way to recognize the same logical writer. For that, use transactions with a stable transactional identifier. And cross-topic atomicity — idempotence is per partition. The promise that either both these records land or neither needs transactions.
+
+Idempotence is the default since Kafka three point zero. When you enable it, the producer also auto-enforces acks all, retries greater than zero, and maximum in-flight requests of at most five. If you set any of those to incompatible values, the producer raises a config error rather than starting up broken.
+
+Transactions.
+
+Idempotence covers a single record on a single partition across producer retries. Transactions extend that to a group of records, possibly across multiple topics and partitions, written atomically. Consumers configured with isolation level read-committed see either all of them or none.
+
+Two settings opt you in. First, transactional identifier — a stable, application-chosen identifier. The same logical producer process across restarts should use the same transactional identifier. The broker uses it to fence off older instances — if a new producer with the same transactional identifier registers, any in-flight transaction from a previous instance is aborted. This is what makes transactions survive crashes cleanly. Second, enable idempotence equals true — but this is implied, because transactions build on the idempotent producer.
+
+The lifecycle for one transaction goes like this. Call init transactions once at startup — this registers the transactional identifier and fences any predecessor. Then call begin transaction. Produce records to one or more topics and partitions. And finally call either commit transaction or abort transaction.
+
+In the demo, we write to two topics atomically — t-x orders and t-x payments. We commit the first transaction and abort the second. Only committed records are visible to a read-committed consumer.
+
+Batching, with batch size and linger.
+
+Two settings shape the throughput-versus-latency tradeoff.
+
+Batch size, default sixteen kilobytes, is the per-partition batch ceiling. When a batch reaches this size, it ships immediately, regardless of linger.
+
+Linger, default zero milliseconds, is how long to wait for more records before shipping a not-yet-full batch.
+
+With defaults — linger zero — a slow trickle of records ships each one as its own request. High per-record network overhead, lots of small batches. Raising linger to even five or twenty milliseconds lets a few more records accumulate per batch, dramatically increasing throughput in exchange for that small added latency.
+
+The demo cell sends five thousand small records twice — once with default linger, once with linger equals twenty milliseconds — and compares the wall-clock time. You should see throughput climb significantly with the higher linger value.
+
+Compression.
+
+Setting compression type on the producer compresses each batch — not each record — before it leaves the client. The broker stores the batch compressed and the consumer decompresses it. So the savings extend through storage and replication too.
+
+Four codecs ship with Kafka. Gzip gives the best ratio but the highest see-pee-you cost. It is a legacy default — pick it only when bandwidth is the binding constraint. Snappy gives a modest ratio with low see-pee-you cost. It was the historical sweet spot. L-Z-four gives a modest ratio with very low see-pee-you cost — faster than snappy on most workloads. And zstd, often pronounced zee-standard, gives near-gzip ratio with moderate see-pee-you cost. It is the modern default — the best ratio-to-see-pee-you tradeoff. It requires brokers and clients on Kafka two point one or later.
+
+Compression needs batching to do anything useful. A one-record batch compresses badly because there is no redundancy to exploit. Pair compression type zstd with a linger of ten milliseconds or higher, and watch the bytes on the wire drop while throughput goes up.
+
+You set it once on the producer and you are done. The broker and consumer figure out the codec from the batch header.
+
+Buffer memory and back-pressure.
+
+The accumulator's total size is bounded by buffer memory. The java client default is thirty-two megabytes. The C client uses a different setting called queue buffering maximum kilobytes, which defaults to one gigabyte.
+
+When the buffer fills — typically because the broker is slow and the sender thread cannot drain fast enough — the produce call does one of two things, controlled by maximum block milliseconds. It either blocks until space is available, for that many milliseconds, or it raises a buffer error if still no space.
+
+This is your built-in back-pressure mechanism. When the broker cannot keep up, the producer eventually pushes back on the application. The opposite would be worse — silently dropping records or growing memory without bound.
+
+Two scenarios where you will feel this. Slow brokers with a fast producer — raise linger or compression to make each request more efficient, or scale brokers. Burst traffic — the buffer absorbs short spikes for free. If spikes regularly exceed buffer size, either raise the buffer or pre-shape the input by rate-limiting upstream.
+
+Common gotchas.
+
+Things that catch every new Kafka user at least once.
+
+Forgetting to flush. Your script exits with records still in the accumulator. They never ship. Always call flush before the producer goes out of scope.
+
+Ignoring delivery callbacks. The produce call returns success even when the eventual broker write fails. If you do not supply an on-delivery callback or check the eventual error somehow, failures are invisible.
+
+Long-running callbacks. Callbacks run on the producer's internal thread. Heavy work inside one blocks the sender. Offload to a queue.
+
+Changing partition count on a keyed topic. The hash-to-partition mapping changes. Same-key records produced before and after the change land on different partitions, breaking per-key ordering.
+
+Producing to a topic that does not exist with auto-create off. The first produce call fails with an unknown topic error. Create topics explicitly with the admin client.
+
+Setting acks equals zero for anything that matters. You will lose records on the next broker hiccup. Do not.
+
+And reusing a transactional identifier across two concurrent producers. The second call to init transactions fences the first, and the first will start seeing producer fenced errors. The transactional identifier must be unique per producer instance you want to keep alive.
+
+What is next.
+
+You can now produce records safely — durably, idempotently, transactionally if needed, with a clear picture of the latency and throughput dials.
+
+Notebook three picks up on the other side. Consumer groups and the rebalance protocol. Offset commits, both automatic and manual, both synchronous and asynchronous, at-most-once versus at-least-once. The auto offset reset setting, and what earliest versus latest actually mean for a new group. Assignment strategies — range, round-robin, sticky, and cooperative-sticky. And the read-committed isolation level — the consumer half of the exactly-once story you started here.
+
+The producer's transactional identifier, plus a consumer's read-committed isolation, plus careful offset commits — that is the full exactly-once recipe. The consumer notebook completes it.
