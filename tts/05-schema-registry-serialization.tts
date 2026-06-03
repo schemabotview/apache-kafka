@@ -1,0 +1,187 @@
+Schema registry and serialization.
+
+What is covered. This notebook walks through why opaque bytes is a footgun at scale, the four practical serialization-format options and where each one fits, what Confluent Schema Registry actually is and is not, the Confluent wire format with its magic byte and schema identifier, the three subject naming strategies, the compatibility modes that govern schema evolution, the practical rules for what is safe to change in Avro, the producer and consumer pattern with Avro, the equivalent pattern for protobuf and json schema, the schema registry rest A-P-I, and a list of common gotchas.
+
+The opaque-bytes problem.
+
+Kafka brokers treat every record value as opaque bytes. That is the right design for the broker — it should not be in the business of understanding payload formats. But it pushes the entire schema problem onto producers and consumers. And plain bytes by convention is exactly how the failure happens.
+
+Picture a payments dot transaction dot created topic. On day one, both producer and consumer agree the payload is json shaped like an object with an I-D string and an amount number. Six months later, three things have gone wrong.
+
+The producer team renames amount to amount-cents and changes the unit. No consumer was notified. Every consumer silently breaks, or worse, silently processes wrong values.
+
+A new consumer team writes against a year-old example payload and trips over a field that was added six months back.
+
+The legal team needs to know what data flows through this topic. The only authoritative answer is to read the producer source — assuming you can find it.
+
+Schema registry exists to solve this socially. Schemas live in a versioned, queryable store that producers and consumers both consult, and the registry enforces compatibility rules on every new schema. Producers cannot ship a breaking change without the registry refusing the new version.
+
+The format you pick — Avro, protobuf, or json schema — matters less than the practice of having a schema at all. Pick one and do not go back.
+
+Format comparison.
+
+Four practical choices, with the trade-offs that matter.
+
+Plain json has the largest wire size, because every record carries field names as text. No schema is required, since you can read records by hand. There is no evolution story — only convention. It is fine for quick prototypes or for human-readable debugging, and that is about it.
+
+Json schema has the same wire size as plain json, but a schema is required in the registry. Evolution is good but verbose. It shines for json-native consumers and rest-shaped systems.
+
+Avro has small wire size — binary, with no field names per record. A schema is strictly required to deserialize. Evolution is excellent because the format was designed around it. Avro is the default in the Kafka ecosystem and integrates cleanly with Hadoop and Spark.
+
+Protobuf has the smallest wire size — binary, using field numbers. A schema is required. Evolution is excellent, with the cardinal rule that you never reuse a field number. Protobuf shines when your services already use g-r-p-c or when your teams are polyglot.
+
+Two things surprise newcomers. First, Avro records on the wire do not include field names. Decoding requires the writer's schema. That is why schema registry is mandatory for Avro in Kafka — the consumer fetches the writer's schema by I-D, then decodes. Second, protobuf records do not include field names either. They include field numbers. That is why never reuse a field number is the cardinal rule of protobuf evolution. An old consumer reading a record with a renumbered field will misinterpret it.
+
+The default recommendation is this. Avro if you are in the Kafka, Hadoop, or Spark ecosystem. Protobuf if you already have g-r-p-c services. Json schema if a chunk of your consumers will read records by hand. Plain json only for prototypes — once a topic has more than one consumer team, you owe yourself a schema.
+
+What schema registry actually is.
+
+Schema registry is a small H-T-T-P service that sits beside the Kafka cluster. Its data model is dead simple, with four concepts.
+
+A schema is a string — Avro json, a protobuf dot proto file, or json schema text.
+
+A subject is a named, versioned bucket of schemas. The default mapping is one subject per topic-and-key-or-value pair. So a payments dot created topic gets two subjects automatically — payments dot created dash value and payments dot created dash key.
+
+A schema I-D is a global, monotonically increasing integer assigned to every unique schema across the whole registry.
+
+A compatibility mode is set per subject, or globally, and it defines the rules new schema versions must satisfy.
+
+What schema registry does not do. It does not validate records — that is the serializer's job. It does not store records themselves — those still live in Kafka. And it does not enforce that a topic's records actually match the registered schema. Only the serializer enforces that. A misbehaving producer that bypasses the serializer can still write garbage.
+
+The Confluent wire format.
+
+Every record serialized through a schema registry serializer has a fixed layout.
+
+Byte zero is the magic byte. It is always zero. It reserves room for future versions of the wire format.
+
+Bytes one through four are the schema I-D. It is a big-endian thirty-two-bit integer. The deserializer reads this first, fetches the schema by I-D from the registry — caching aggressively — and then decodes the payload.
+
+Bytes five and onward are the payload. The actual Avro, protobuf, or json schema bytes. No field names for Avro, no field names for protobuf, full json for json schema.
+
+Two practical consequences. First, five bytes of overhead per record. Negligible at any realistic record size. Second, you cannot read a schema registry record without the registry. A consumer that loses connectivity to schema registry cannot decode anything. Plan for that operationally — run the registry close to your consumers, with its own retention and backup.
+
+Subject naming strategies.
+
+How does a subject name get derived from a topic name? The producer's subject name strategy decides. Three choices.
+
+Topic name strategy is the default. The subject becomes topic-dash-value or topic-dash-key. Use this when there is one record type per topic — the common case.
+
+Record name strategy makes the subject the fully qualified record name. For example, com dot example dot payment-created. Use this when many topics share the same record type and you want to keep one schema reused everywhere.
+
+Topic record name strategy makes the subject topic-dash-record-name. Use this when one topic carries multiple record types and you want each type evolved independently.
+
+Pick topic name strategy unless you have a specific reason not to. It maps cleanly onto one topic, one schema, which is the right default for most domain event streams.
+
+Topic record name strategy is the way to do polymorphic topics cleanly. For example, an events topic that carries order-created, order-shipped, and order-cancelled records side by side, each with its own evolution history. The trade-off is that consumers must be ready to handle any of the record types they subscribe to.
+
+Compatibility modes.
+
+When you register a new version of a schema, the registry checks it against the existing versions. The compatibility mode — set per subject or globally — decides what it checks. There are four base modes, plus transitive variants.
+
+None means a new schema can be registered always. No safety. Avoid.
+
+Backward means a new schema can be registered if an old reader can decode records written with the new schema. Rolling deploy order is upgrade consumers first, then producers.
+
+Forward means a new schema can be registered if a new reader can decode records written with the old schema. Rolling deploy order is upgrade producers first, then consumers.
+
+Full means both backward and forward. Either rolling deploy order works.
+
+And the transitive variants — for example, backward-transitive — run the check against all previous versions, not just the most recent. Stricter, and the right default in practice.
+
+The default is backward, and it is the right one for almost every event-streaming topic. Backward-compatible means old consumers keep working as new producers ship the new schema. You upgrade consumers first to learn the new schema, then producers start writing it. Existing consumers continue reading without changes.
+
+The transitive variant of any mode checks compatibility against every version since v one, not just the latest. This catches two compatible hops that are not compatible end to end. Useful when very old consumer versions might still be in production.
+
+What is safe to change.
+
+Under backward compatibility — the default — here is the practical rule of thumb for Avro.
+
+Adding a field with a default value is safe. Old consumers' missing field is filled with the default.
+
+Removing a field that had a default is safe. Old consumers' default fills in for the absent field.
+
+Adding a field without a default is unsafe. Old consumers cannot decode the new field.
+
+Removing a required field — one with no default — is unsafe. Old consumers expect it, and deserialization fails.
+
+Renaming a field is unsafe. Use aliases instead — declare the new field with an aliases array containing the old name.
+
+Changing a field's type is risky and only sometimes safe. Only certain promotions work — integer to long, integer to float, float to double, string to bytes.
+
+Adding a value to a union is risky. Old consumers cannot handle the new branch.
+
+Adding a value to an enum is unsafe under backward. Add a default to the enum schema first.
+
+The single most useful rule to remember is this. Always give new fields a default value. It is the cheapest way to keep evolution safe, and it makes both backward and forward compatibility almost automatic.
+
+Setup.
+
+Schema registry is a Confluent component, not part of the apache slash kafka image. The simplest path is the Confluent image, pointed at the same broker — there is a docker command for it in the notebook. Python dependencies are the confluent-kafka package with the avro extra, fastavro, and requests, as documented in the repo's class-md.
+
+The cells below assume both Kafka on localhost port nine zero nine two, and schema registry on localhost port eight zero eight one, are running.
+
+Avro, producing version one.
+
+We define a small Avro schema for payments dot created with three fields — payment I-D, customer I-D, and amount. We produce three records through the schema registry serializer. On first produce, the serializer registers the schema if it is not already there, and stamps every record with the assigned schema I-D.
+
+Avro, evolving to version two.
+
+We add a currency field with a default of U-S-D. This is the canonical safe Avro evolution. Old consumers reading new records get U-S-D filled in for the missing field. New consumers reading old records do the same.
+
+Producing with v two below registers a new version under the same subject. The schema registry validates that v two is backward-compatible with v one. If it is not, the call raises an error before any record ships.
+
+Avro, consuming both versions.
+
+The consumer reads back all five records using a single deserializer. Because v two is backward-compatible with v one, the deserializer can decode both old and new records into the v two shape. Old records get currency equals U-S-D filled in automatically.
+
+This is the whole point of schema evolution. Consumers do not have to know about every historical version separately.
+
+What a breaking evolution looks like.
+
+We try to register a v three that removes the required payment I-D field. Under the default backward mode, the registry should reject it — an old consumer expecting payment I-D cannot decode a v three record where the field is gone.
+
+We catch the registry's error and print it. No records are produced.
+
+The schema registry rest A-P-I.
+
+Schema registry is just H-T-T-P. Every operation you will do from a client is a rest call you can hit with curl. The notebook lists the most useful endpoints.
+
+Get subjects lists every subject in the registry. Get subjects-slash-name-slash-versions lists the version numbers for a subject. Get subjects-slash-name-slash-versions-slash-version fetches a specific schema version, where the keyword latest also works. Get schemas-slash-i-d-s-slash-i-d fetches a schema by its global I-D — what deserializers do internally. Post subjects-slash-name-slash-versions registers a new schema version, which is what the serializer does for you on first produce. Post compatibility-slash-subjects-slash-name-slash-versions-slash-version checks whether a candidate schema is compatible without registering it. Put config and put config-slash-subject set the global or per-subject compatibility mode. Get config-slash-subject reads the effective compatibility mode. And delete subjects-slash-name soft-deletes a subject, recoverably — adding question-mark permanent equals true hard-deletes it.
+
+The demo cell lists the subjects we have registered, then fetches the latest version of the payments dot created dash value subject, and prints the effective compatibility mode.
+
+Protobuf and json schema.
+
+The pattern with confluent-kafka is the same. Only the serializer changes.
+
+Protobuf. Define a dot proto file, generate Python bindings with protoc, then use the protobuf serializer and deserializer from confluent-kafka schema registry. Evolution rules are simple. Never reuse a field number. Mark removed fields with reserved. Give new fields explicit numbers. Compatibility checks work the same as Avro.
+
+Json schema. The schema is a json-schema document, and the payload is regular json. Closest to plain json in feel, with the registry enforcing structure. Use the json serializer and deserializer from confluent-kafka schema registry. Json schema produces records you can pipe through j-q if you strip the five-byte header — useful for debugging. Wire size is the largest of the three. Pick it when human-readability outweighs efficiency.
+
+Common gotchas.
+
+Forgetting the magic byte. Trying to deserialize a raw Avro or protobuf payload without the Confluent header, using a schema registry deserializer, fails. The five-byte prefix is non-optional in the Kafka ecosystem.
+
+Bypassing the serializer in one producer. All it takes is one rogue producer writing plain json to a schema-registry-managed topic to corrupt consumer pipelines. Enforce serializer use in code review, or through broker-side schema validation — Confluent server-side schema validation does this.
+
+Wrong compatibility mode for the rollout order. Backward requires consumers upgraded first. Forward requires producers first. Pick the mode that matches how your team actually deploys.
+
+Renaming a field without an alias. Treated as remove-old plus add-new. Both break backward compatibility. Use aliases instead.
+
+Adding a no-default field. The single most common breaking change in Avro topics. Always add a default.
+
+Schema registry as a single point of failure. Consumers cannot decode anything without it. Run it highly available, with the underscore-schemas backing topic replicated, and monitor for unavailability.
+
+One schema registry per environment. Schemas are environment-scoped. Dev and prod registries are independent. Do not try to share.
+
+Soft-delete then re-register a different schema. Subject I-Ds survive soft-deletes. The registry may reject the new schema for compatibility against the deleted version. Hard-delete with question-mark permanent equals true if you really want to reset.
+
+What is next.
+
+Records now have a shape the system can enforce. Producers cannot ship breaking changes, and consumers do not have to guess the wire format.
+
+Notebook six covers Kafka connect. Pre-built source and sink connectors running as long-lived workers — so a change-data-capture pipeline from postgres or a sink to S three is config, not code. Schema registry plugs in here too. The j-d-b-c source connector emits Avro records keyed by table schema.
+
+Notebook seven covers Kafka streams. Stateful stream processing — joins, aggregations, windowed counts — over the schematized topics you can now trust.
+
+Notebook eight closes the curriculum with operations, security, and performance tuning. Monitoring, ssl, sasl, ay-see-els, and broker tuning.
