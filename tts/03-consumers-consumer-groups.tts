@@ -1,0 +1,203 @@
+Consumers and consumer groups.
+
+What is covered. This notebook walks through the poll loop that every consumer takes, consumer groups and how parallelism and partition assignment actually work, the group coordinator and the heartbeat, the rebalance protocol with both eager and cooperative variants, the four assignment strategies, offsets revisited from the consumer side, the auto offset reset setting, the four commit modes, delivery semantics on the consumer side, the read-committed isolation level that completes the exactly-once recipe, static membership for surviving rolling restarts without rebalances, the three timeouts that govern liveness, the difference between subscribe and assign, the seek call for replay and time-travel, the pause and resume calls for consumer-side back-pressure, and a list of common gotchas.
+
+The poll loop.
+
+Every Kafka consumer, in every language, follows the same shape. Configure. Subscribe. Loop — poll, process, commit. Close.
+
+The poll call does four things at once. First, it sends the heartbeat that tells the group coordinator the consumer is still alive. Second, it participates in any rebalance the coordinator is running. Third, it fetches records from the brokers that lead the partitions the consumer owns. And fourth, it returns one record, or none on timeout, back to your code.
+
+Here is the single most important rule of consumer programming. Keep calling poll. If your processing loop takes too long between polls, the coordinator decides you are dead, kicks you out of the group, and triggers a rebalance. We will see the exact timeout shortly.
+
+Setup.
+
+Same broker as before. We reuse the foundations-demo topic and produce some fresh records so each demo starts from a known state.
+
+A minimum consumer.
+
+Four config keys are enough to start.
+
+Bootstrap servers, which is where to find the cluster. Group I-D, the name of the consumer group this consumer belongs to. The single most important config — the source of identity for rebalancing and offset storage. Auto offset reset, which is what to do when this group has no committed offset, typically because it is brand new. And enable auto commit, which is whether the client automatically commits offsets in the background. It defaults to true.
+
+In the demo we subscribe, poll a few times, print what arrives, and close.
+
+Consumer groups.
+
+A consumer group is a set of consumers that share the work of reading a topic. The group coordinator — which is a broker, picked per group — assigns each partition to exactly one consumer in the group.
+
+Two things to internalize. First, each partition is read by exactly one consumer within a group. That is how Kafka gives you parallelism without locks or coordination. Each consumer owns a disjoint slice of the topic. Second, different groups are independent. A billing group and an analytics group each get their own view of the topic, each with their own committed offsets. Adding a new group does not slow anything down or steal records from existing groups.
+
+The hard ceiling on parallelism is the partition count. Six partitions, six consumers — perfect. Six partitions, eight consumers — two consumers sit idle. The only way past that ceiling is to add partitions to the topic, which, as you saw in notebook one, breaks per-key ordering for any key that moves.
+
+The group coordinator and the heartbeat.
+
+Each group has a designated group coordinator. It is one broker in the cluster, picked deterministically from the group I-D hash. The coordinator is responsible for three things. Tracking which consumers are alive in the group through heartbeats. Running the rebalance protocol when membership changes. And persisting the group's committed offsets to the internal consumer offsets topic.
+
+Three timeouts govern liveness, and you should know them by name.
+
+Session timeout, defaulting to forty-five seconds, is the threshold. If the coordinator has not seen a heartbeat for this long, the consumer is declared dead and dropped from the group.
+
+Heartbeat interval, defaulting to three seconds, is how often the consumer sends a heartbeat. Heartbeats happen on a separate background thread.
+
+Maximum poll interval, defaulting to five minutes, is the limit on how long your code can go without calling poll. If you do not call poll for this long, the consumer is declared dead, even if heartbeats are still flowing.
+
+Heartbeats run on a background thread, so a hung processing loop will not stop them. That is why maximum poll interval exists. It is the safety net for slow processing. If your handler can legitimately take longer than five minutes on a record, raise this. But if it takes more than that because something is wrong, you want the rebalance to kick in. The defaults assume normal record processing finishes well under five minutes.
+
+The rebalance protocol.
+
+Anything that changes group membership triggers a rebalance. A consumer joins. A consumer leaves. A consumer dies. The topic's partition count changes. The coordinator runs a small protocol that redistributes partitions across the surviving members.
+
+Two flavors of rebalance exist, and the gap between them matters for production.
+
+Eager rebalance is the legacy form, used with the range and round-robin strategies. It works in three steps. First, every consumer stops reading and revokes all its partitions. Then the coordinator computes the new assignment. Then each consumer gets its new partitions and resumes. During all three steps, no partition is being read. This is the infamous stop-the-world rebalance — a multi-minute consumer outage when a fat group rebalances during a bad deploy.
+
+Cooperative rebalance, also called incremental rebalance, is the modern form. It is used with the cooperative-sticky strategy. The coordinator computes the new assignment first. Only the delta is revoked — partitions that need to move to a different consumer. Consumers keep reading partitions they still own throughout. The stop-the-world window shrinks to the few partitions that actually move. This is what you want for any group of more than a handful of consumers.
+
+Assignment strategies.
+
+The partition assignment strategy config chooses how the coordinator hands partitions out. There are four options.
+
+Range is the legacy default. It uses eager rebalance. Per topic, it gives each consumer a contiguous range of partitions. The drawback is that it is imbalanced when partition count does not divide evenly across consumers.
+
+Round-robin uses eager rebalance. It spreads partitions evenly across consumers across all subscribed topics.
+
+Sticky uses eager rebalance. It behaves like round-robin but tries to minimize partition movement across rebalances.
+
+Cooperative-sticky is the modern choice. It uses the cooperative rebalance protocol. It has the same balance properties as sticky, but the incremental rebalance avoids the stop-the-world pause.
+
+The honest recommendation is this. Use cooperative-sticky unless you have a reason not to. It minimizes both partition movement and the stop-the-world window. The legacy range default exists for backward compatibility. New groups should opt into cooperative.
+
+All consumers in the group must agree on the strategy — the coordinator picks the one shared by every member. A rolling migration from range to cooperative-sticky is allowed by listing both strategies during the transition.
+
+Offsets revisited.
+
+Two distinct numbers live on the consumer side.
+
+The current position is the next offset that poll will return for a partition. It lives in the consumer process and advances every time a record is delivered.
+
+The committed offset is the offset persisted to the broker — the marker that says this group has processed everything before this point. When a consumer joins a group and gets assigned a partition, the broker hands back the committed offset, and the consumer resumes from there.
+
+Committed offsets are stored in an internal Kafka topic called consumer offsets, with one record per group, topic, and partition. It is just another compacted topic. You can read it like any other, though in practice you use the kafka-consumer-groups command-line script to inspect group state.
+
+Think of it this way. The consumer's position is a runtime cursor. The committed offset is a save game. A consumer crash forgets the cursor but preserves the save.
+
+Auto offset reset.
+
+When a consumer joins a group for the first time, or its committed offset has been deleted by retention, the consumer has nowhere to start from. The auto offset reset setting picks the policy.
+
+Earliest means start at offset zero, or whatever is earliest still in the log after retention. Use this when you want to process everything you can see.
+
+Latest means start at the end of the log. Use this when you only care about new records from now on. This is the default.
+
+None means throw a no-offset error. Use this when missing offsets indicate a real bug worth surfacing rather than silently picking a side.
+
+Here is the trap to remember. Auto offset reset only matters when there is no committed offset. Once a group commits even one offset, the setting is irrelevant — the group resumes from its commit. Beginners often think changing it to earliest will reprocess everything, then are surprised when nothing happens. To actually reprocess, you have to seek, covered below, or use a fresh group I-D.
+
+Commit modes.
+
+Four combinations. Pick deliberately.
+
+Auto commit, where enable auto commit is true and is the default. The client periodically commits offsets in the background, every auto commit interval milliseconds. The default is five seconds. The committed offset is the position returned by the most recent poll, so the commit advances ahead of your processing. If your code crashes after poll but before finishing the record, the next consumer starts past the unprocessed record. That is at-most-once semantics by accident.
+
+Manual commit, synchronous. You call commit with no arguments after processing a batch. It blocks until the broker acknowledges. Slow but correct — the commit guarantees the broker has the offset persisted.
+
+Manual commit, asynchronous. You call commit with asynchronous true after processing. It returns immediately, and the commit happens in the background. Fast, but if the consumer crashes between the call and the actual commit, the offset is lost.
+
+The common production pattern is this. Async commit during the steady-state loop, which is cheap. Then one sync commit on shutdown, which is correct on the way out.
+
+In the demo cell, we process records in small batches and commit synchronously after each batch. That gives at-least-once semantics with controlled cost.
+
+Delivery semantics on the consumer side.
+
+The producer side has acks and idempotence. The consumer side has commit ordering. The choice between at-most-once and at-least-once comes down to when you commit relative to when you process.
+
+Commit before processing gives you at-most-once. A crash after commit means the next consumer skips a record. Records can be lost, never duplicated.
+
+Commit after processing gives you at-least-once. A crash after processing but before commit means the next consumer reprocesses. Records can be duplicated, never lost. This is the default and almost always the right choice.
+
+Because duplicates are inevitable in at-least-once mode, your downstream must be idempotent. Reprocessing the same record twice should yield the same result. Common patterns are deduplication keys, upsert or merge writes, and idempotent H-T-T-P endpoints.
+
+Exactly-once is the third option, and it is not a single setting. It requires three things working together. First, on the producer side, a transactional I-D, covered in notebook two, so writes are transactional. Second, on the consumer side, the read-committed isolation level, so aborted records are skipped. Third, a consume-process-produce pattern where the offset commit and the produced output are in the same transaction. The producer A-P-I method called send offsets to transaction does exactly that — the offsets are committed only if the transaction commits.
+
+For a plain consume-process loop with no downstream produce, exactly-once collapses to at-least-once plus idempotent processing. That is by far the most common shape in production.
+
+The read-committed isolation level.
+
+When the producer side uses transactions, the broker writes the transaction's records to the log immediately, and then marks the transaction committed or aborted later. A naive consumer would see records from an aborted transaction.
+
+The isolation level setting picks how the consumer handles that.
+
+Read-uncommitted, the default, returns every record on disk, including aborted-transaction records. Fastest, no protocol overhead.
+
+Read-committed skips records from aborted transactions, and does not return records from in-flight, not-yet-committed transactions. This is required for the exactly-once recipe.
+
+In the demo, we re-run the transaction example from notebook two and read both topics with read-committed. The aborted order B records are filtered out, while the committed order A records appear.
+
+A small note. Read-committed introduces a small latency tax. The consumer cannot return records past an in-flight transaction's first record until it knows the outcome. Most workloads do not notice. Latency-sensitive ones should measure.
+
+Static membership.
+
+By default, every consumer process is anonymous from the coordinator's perspective. When a process restarts, it looks like a new member, and a rebalance runs. For a one-hundred-pod consumer deployment, a rolling restart can trigger one hundred rebalances.
+
+Static membership, set through group instance I-D, gives each consumer a stable identity. When a consumer with a known group instance I-D disconnects and reconnects within session timeout, the coordinator treats it as the same member, and does not rebalance. The partitions are held for that instance I-D until either the consumer comes back or the session times out.
+
+Two practical notes. Set session timeout high enough to cover a normal restart — usually one to two minutes. And the instance I-D must be unique per process. In kubernetes, this is naturally the pod name. In a static deployment, it is the host name. Re-using an instance I-D across two live processes fences the older one.
+
+Combined with cooperative-sticky, static membership is the modern recipe for big consumer groups in production. Rolling restarts cause near-zero rebalance churn.
+
+Subscribe versus assign.
+
+There are two ways to tell a consumer what to read.
+
+Subscribe with a list of topic names joins a group. The coordinator hands you partitions and rebalances when membership changes. This is the default and what you want ninety-five percent of the time.
+
+Assign with a list of specific topic-partitions pins to those partitions manually. No group membership, no rebalance, no offset auto-commit interaction with a group. You take responsibility for fault tolerance — if your consumer dies, nothing reassigns its partitions.
+
+When do you reach for assign? One-off scripts that need to read a specific partition. Stateful stream-processing frameworks like Kafka Streams and Flink, which do their own partition assignment. And tests that want exact, deterministic positioning.
+
+Seek.
+
+Once partitions are assigned — either through subscribe after the first poll, or directly through assign — the seek call moves the consumer's position to an arbitrary offset.
+
+Three common patterns. Seek to beginning replays everything in the partition. Seek to end skips past everything currently in the log and only reads what arrives next. And seek by timestamp, where you call offsets for times with a timestamp in milliseconds and it returns the first offset at or after that timestamp, which you then seek to. This last one is useful for replays like start from yesterday at midnight.
+
+In the demo, we seek a fresh consumer to the beginning of partition zero and read just that partition.
+
+Pause and resume.
+
+Sometimes a downstream system, a database, or an H-T-T-P A-P-I is overloaded, and you need the consumer to stop pulling new records. But you cannot just stop calling poll, because that would trigger a rebalance.
+
+The pause call, given a list of topic-partitions, tells the consumer to not fetch from those partitions on the next polls. The resume call undoes it. The consumer keeps heartbeating and stays in the group. It just stops fetching.
+
+Use cases. Database connection pool exhausted — pause until the pool recovers. Buffer to a downstream queue full — pause until the queue drains. Per-partition back-pressure — pause only the partitions that point to the slow downstream tenant.
+
+The mental model is this. Pause is to a consumer what an inbound rate-limit is to an H-T-T-P client. It is how you avoid blowing yourself up when downstream slows down.
+
+Common gotchas.
+
+Blocking inside the poll loop. Anything slow inside the loop pushes you toward maximum poll interval. Offload heavy work, or raise the limit deliberately — do not drift into rebalance storms.
+
+Auto-commit plus side effects. With enable auto commit true, a crash mid-processing skips records. If your handler writes to a database, switch to manual commit after the write succeeds.
+
+Forgetting to close. A clean close commits offsets if auto-commit is on, and sends a leave group request so the coordinator rebalances immediately. Skipping it makes the group wait the full session timeout before noticing.
+
+Reusing a group I-D for unrelated workloads. Two unrelated consumer applications with the same group I-D will split the topic between them — each sees only half the records. Group I-Ds are application identity, not labels.
+
+Expecting auto offset reset earliest to reprocess. It only kicks in when there is no committed offset. Use seek or a new group I-D to actually replay.
+
+Too many partitions per consumer. A single consumer assigned hundreds of partitions becomes the bottleneck. Either add consumers or split the topic.
+
+Group instance I-D collisions. Two processes with the same static I-D fence each other, and the older one starts seeing fenced errors. Use the pod or host name.
+
+What is next.
+
+You can now produce and consume safely, with a clear picture of rebalances, commits, and the exactly-once recipe end to end.
+
+Notebook four covers topics, partitions, and storage. How to size a partition count. Retention policies — time versus size. Log compaction. Segment files on disk. Tiered storage.
+
+Notebook five covers schema registry and serialization. Why opaque bytes is a footgun at scale. Avro, protobuf, and json schema. Schema evolution. The wire format.
+
+Notebook six covers Kafka connect. Pre-built producers and consumers running as long-lived workers. Source connectors. Sink connectors. Single message transforms.
+
+Producers and consumers are the A-P-I. Topic design and serialization are how you make that A-P-I scale.
