@@ -1,0 +1,155 @@
+Kafka connect.
+
+What is covered. This notebook walks through what Kafka connect is and the config-not-code pitch, the difference between source and sink connectors, the runtime model of workers, connectors, and tasks, standalone versus distributed mode, the connect rest A-P-I, converters that bridge structured records and bytes, single message transforms, where source and sink offsets live, error handling and dead-letter queues, the connectors you will actually meet in production, and a list of common gotchas.
+
+The pitch.
+
+Most Kafka pipelines you would build by hand do the same thing. Read from some external system — a database, a file, an A-P-I, a queue — and produce records. Or consume records and write them somewhere else — a warehouse, an object store, a search index. The producer or consumer code is mostly boilerplate. Bootstrap, batch, commit, handle retries, restart on failure. And the actual value is in the plumbing.
+
+Kafka connect is that plumbing, factored out. A connector is a jar you drop into a connect worker, configured through a json document, that does one of two things.
+
+A source connector pulls data from an external system into Kafka topics. Examples are debezium reading the postgres write-ahead log, the j-d-b-c source polling a table, and mirror-maker two mirroring another cluster.
+
+A sink connector pulls data from Kafka topics into an external system. Examples are the S three sink writing parquet files, the elasticsearch sink indexing records, and the j-d-b-c sink upserting to a table.
+
+Connect handles the parts you would otherwise rebuild every time. Offset tracking. Restart from failure. Parallelism. Schema integration with schema registry. Configuration through rest. Distributed coordination across worker nodes. You write configuration, not code. Most production Kafka deployments have more connect workers than application producers and consumers combined.
+
+When not to use connect. When your data movement also requires non-trivial business logic. Single message transforms are good for projection, renaming, filtering. They are not good for joining two streams or calling a downstream A-P-I for enrichment. For that, write a Kafka streams app, covered in notebook seven, or a regular consumer.
+
+The runtime model.
+
+Three nouns, hierarchical.
+
+A worker is a java virtual machine process running the connect runtime. You start workers like brokers. A connect cluster is the set of workers sharing the same group I-D, in distributed mode.
+
+A connector is a logical pipeline you create through rest. Configuration says which connector class, which source or destination, which Kafka topics, how to convert records. A connector itself does no work.
+
+A task is the unit of execution. The connector class is asked, given this config, how many tasks can you parallelize this into? And it produces one through N task configs. Each task is assigned to one worker and runs there.
+
+Two things to internalize. First, parallelism is task-count, capped by the connector's nature. A j-d-b-c source against five tables runs at most five tasks. A sink connector parallelizes up to the partition count of the source topic. Setting tasks-max to ten on a connector that can only produce three task configs gets you three tasks, not ten. Second, tasks are reassigned across workers as workers come and go. Distributed connect runs its own internal consumer-group-style rebalance protocol. So you can scale workers horizontally and tasks redistribute automatically.
+
+Standalone versus distributed mode.
+
+Connect ships in two modes, and the gap matters for production.
+
+Standalone mode runs one worker, one configuration file, with per-connector properties files. Source offsets are stored in a local file on disk. No cluster, no rebalance. Useful for development, demos, and edge cases where connect is co-located with a non-distributed source like a file tail on a single host.
+
+Distributed mode runs N workers sharing a group I-D. Configuration is stored in Kafka itself, in three internal topics. The config storage topic holds connector configurations. The offset storage topic holds source-connector offsets — last log sequence number read, last file position, and so on. And the status storage topic holds task and connector status — running, failed, paused.
+
+All three should be created with replication factor three and cleanup policy compact in production. They are typically prefixed with an underscore — for example, underscore connect-configs.
+
+For anything beyond a one-off, use distributed mode even with a single worker. The rest A-P-I, the in-Kafka config storage, and the ability to scale horizontally later are worth the small extra setup cost up front.
+
+Setup.
+
+Start a connect worker in distributed mode alongside the existing Kafka broker. The cp-kafka-connect image bundles the runtime plus the standard converters. You can install additional connectors with confluent-hub. The docker command is in the notebook.
+
+Replication factors of one are for the local single-broker demo only. In production, set all three internal topics to replication factor three.
+
+The demo cell confirms the worker is up and lists the installed connector plugins. The file-stream source connector and file-stream sink connector ship with the worker out of the box. We use those for the demos.
+
+The connect rest A-P-I.
+
+Everything is H-T-T-P. The endpoints you will use over and over.
+
+Get slash connectors lists connector names. Post slash connectors creates a connector. The body is a json document with name and config. Get slash connectors slash name fetches connector config. Get slash connectors slash name slash status gives the state of the connector and each task — running, paused, failed, and so on. Put slash connectors slash name slash config updates the config and creates the connector if missing — useful for idempotent infrastructure as code. Put slash connectors slash name slash pause pauses without losing position. Put slash connectors slash name slash resume resumes. Post slash connectors slash name slash restart with the include-tasks flag restarts failed tasks. Delete slash connectors slash name tears it down. Get slash connector-plugins lists what classes this worker knows. And put slash connector-plugins slash class slash config slash validate validates a config before creating it.
+
+The demo creates a file-stream source connector that watches a file and produces each new line as a record to the connect-demo topic. We then poll the connector's status until it reports running, and finally read back the records the connector produced using a regular consumer.
+
+Converters.
+
+Connect's internal A-P-I works on structured records — a typed object with a schema and a value. The broker, of course, holds bytes. The bridge is a converter, configured per connector for both keys and values.
+
+Five converters you will meet. The string converter produces and consumes plain U-T-F-eight strings — no schema. The json converter produces and consumes json, optionally with an envelope holding schema and payload. The Avro converter pairs Avro with schema registry — the production default. The protobuf converter pairs protobuf with schema registry. And the json-schema converter pairs json schema with schema registry.
+
+The pairing rule is this. Key converter and value converter are independent. A common setup is string converter for keys, which are usually identifiers, and Avro converter for values, which are typed records.
+
+If you set the json converter with schemas enable true — the default — every record is wrapped in an envelope including the schema. Verbose, but lets you decode without schema registry. With schemas enable false, you get plain json. For production with multiple consumers, use the Avro, protobuf, or json schema converters with schema registry. Same rationale as notebook five.
+
+Single message transforms.
+
+Connectors emit records. Single message transforms — abbreviated S-M-Ts — edit those records in flight before the converter touches them. They are configured per connector through a transforms chain.
+
+For a source connector, the flow is source, then S-M-T one, then S-M-T two, and so on, then converter, then broker. For a sink connector, the flow is broker, then converter, then S-M-T one, then S-M-T two, and so on, then sink.
+
+A common chain on a j-d-b-c source connector reading a customers table has three steps. First, route — rewrite the topic name from customers to prod dot customers dot v one using a regex router. Second, add prefix — insert a header for downstream tenant routing. Third, drop nulls — filter out tombstones from the source.
+
+The good use cases for single message transforms are rename, drop, or mask fields, route to a different topic, flatten nested records, extract a field into the message key, insert or cast or drop fields, and filter tombstones.
+
+The wrong use cases for single message transforms are joining two streams, calling out to a service, aggregating, and anything stateful. Single message transforms run per record, in isolation, with no state. Reach for Kafka streams or a custom consumer instead.
+
+Source offsets and sink offsets.
+
+Two different stories on either side of connect.
+
+Source connectors track position in the source system. That position is opaque to Kafka. It might be a postgres log sequence number, a file byte offset, an H-T-T-P cursor token, or an M-Q message I-D. The connector reports it after producing each record, and connect stores it in the offset storage topic. On restart, the connector reads its last reported position and resumes there. This is the standard at-least-once contract. A crash between produce and offset commit means the next run re-reads some records.
+
+Sink connectors are just consumers under the hood. They use a normal consumer group — connect-dash-connector-name by default — with all the offset machinery from notebook three. The connector framework polls the consumer, hands records to the sink task, and commits offsets after the task acknowledges the batch. Same at-least-once contract. The sink had better be idempotent. Most are — they upsert by primary key.
+
+To inspect or reset offsets. On the source side, read the offset storage topic directly, or use the offset-tracking rest endpoints. Kafka three point six added get slash connectors slash name slash offsets, plus patch and delete. On the sink side, use the kafka-consumer-groups command-line script against the consumer group, exactly as you would for any consumer.
+
+Error handling and dead-letter queues.
+
+Records will fail to convert, fail single message transforms, or fail to write to a sink. Three knobs decide what happens.
+
+Errors tolerance — none, the default, means the first failure kills the task. All means failures are tolerated and the connector keeps running.
+
+Errors log enable plus errors log include messages — log the failure, optionally with the offending record.
+
+And errors dead-letter-queue topic name — for sink connectors with errors tolerance set to all, write failed records to this topic instead of dropping them. Headers on the dead-letter-queue record describe the failure. Pair with errors dead-letter-queue context headers enable true to populate those headers.
+
+The honest production recipe is this. Errors tolerance all. Errors log enable true. Errors log include messages false, because records may contain personally identifiable information — keep them out of logs. Errors dead-letter-queue topic name set to connect-d-l-q. Errors dead-letter-queue context headers enable true. Errors dead-letter-queue topic replication factor three. Errors retry timeout five minutes. Errors retry delay max one minute.
+
+Monitor the dead-letter-queue topic. Record arrival there is your signal that the source or sink hit something unexpected. A non-empty dead-letter-queue that nobody monitors is the same as silent data loss.
+
+The connectors you will actually meet.
+
+A short tour of the ones that come up over and over.
+
+Debezium, a source connector, does change data capture from postgres, my-s-q-l, sql server, mongo-d-b, and oracle. It tails the database's replication log and produces one topic per table, each record being a row-level change event with operation type, before state, after state, and source metadata. It is the default for getting o-l-t-p state into Kafka.
+
+J-d-b-c source polls a sql table on an interval. Incrementing-column or timestamp mode captures new rows. Bulk mode does full reloads. It is simpler than debezium but does not see deletes and does not capture in-between changes. Useful for append-only data and analytics-only mirroring.
+
+J-d-b-c sink writes Kafka records to a sql table. It supports insert and upsert, configured through primary-key mode and insert mode set to upsert. One of the most common sinks.
+
+The S three, G C S, and Azure Blob sinks from Confluent write batches to object storage in parquet, Avro, or json. Time-partitioned or size-partitioned. The standard way to land Kafka data in a warehouse.
+
+The elasticsearch sink indexes records into an elasticsearch or open-search index. Used for log search and analytics dashboards.
+
+Mirror-maker two mirrors topics from one Kafka cluster to another — for disaster recovery, regional fan-out, or migration. It is built on connect, and you configure it like any other connector.
+
+The H-T-T-P sink from Confluent posts records to an arbitrary H-T-T-P endpoint with retry and dead-letter-queue semantics. The escape hatch for systems without a dedicated connector.
+
+A sink example.
+
+Same pattern, reversed. The file-stream sink connector reads from a topic and writes each record value as a line to a file. We point it at the connect-demo topic the source just populated.
+
+The demo creates the sink connector, polls until it reports running, gives the sink a couple seconds to flush, then reads the output file. Finally, we clean up both demo connectors.
+
+Common gotchas.
+
+All config values must be strings. Even numbers and booleans. Tasks-max equals quote four quote, not the number four. The rest A-P-I rejects non-string values.
+
+Tasks-max is a maximum, not a target. The connector class decides the real parallelism — sometimes far less than you ask for. Watch the status output.
+
+Config storage, offset storage, and status storage topics with replication factor one in production. They hold the entire connect cluster's state. Set them to replication factor three and cleanup policy compact before you ship.
+
+Mixing json-with-envelope and Avro across producers and connect consumers. Either everyone uses schema registry, or nobody does on a given topic. Inconsistent converters silently corrupt downstream pipelines.
+
+Single message transform order matters, and single message transforms are stateless. They run in declared order, per record. Do not try to do anything that needs history or cross-record context.
+
+Forgetting to monitor the dead-letter queue. A non-empty dead-letter queue that nobody watches is silent data loss with extra steps.
+
+Source offsets in distributed mode are keyed by connector name and source partition. Renaming a connector resets it to the beginning. Renames are not free.
+
+One connect cluster per environment. Sharing one connect cluster across staging and production is a recipe for confused tasks landing in the wrong place. Run separate clusters.
+
+What is next.
+
+Connect handles the move-data half of most pipelines. The remaining half is transform data while it is in motion — joins, aggregations, windowed counts — which is what stream processing engines do.
+
+Notebook seven covers Kafka streams. The library shipped with Kafka for stateful stream processing on the java virtual machine. K-stream and k-table, joins, windowing, state stores, the exactly-once stream-processing recipe.
+
+Notebook eight closes the curriculum with operations, security, and performance tuning. Monitoring through java management extensions, the metrics that actually matter, ssl, sasl, ay-see-els, broker tuning, and scaling.
+
+Producers, consumers, topic design, schemas, and connect — that is the data-plane A-P-I surface. Streams and ops are how you make it production-grade.
