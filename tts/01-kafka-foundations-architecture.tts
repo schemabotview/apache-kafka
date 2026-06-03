@@ -1,0 +1,157 @@
+Kafka foundations and architecture.
+
+What is covered. This notebook walks through what Kafka is, the cluster anatomy of brokers, producers, consumers, and the controller, the append-only log that the rest of Kafka is built on, the three nouns the whole ay-pee-eye is shaped around — topics, partitions, and offsets, how replication works through leaders, followers, and the in-sync replicas set, the controller and the shift from zookeeper to k-raft, the main hosting options, when Kafka is the wrong tool, the canonical client setup used throughout this series, a hello-world produce and consume loop, the ordering guarantees Kafka actually makes, and a primer on the three delivery semantics.
+
+The problem Kafka solves.
+
+Imagine a bank where the mobile app, the fraud detector, the ledger, the analytics warehouse, and the customer-notification service all need to know about every payment the moment it happens. With five services, you could wire each one directly to the source — that is ten point-to-point connections. With twenty services, it is one hundred ninety. Each connection has its own retry logic, its own back-pressure handling, its own schema assumptions. One slow consumer back-pressures the producer. One schema change breaks five integrations.
+
+Kafka exists because this pattern keeps appearing the moment a company outgrows a single database. Many producers, many consumers, many event types, all needing a durable buffer in between. Instead of point-to-point wiring, every event is appended to a shared log, and every service reads from that log at its own pace.
+
+What Kafka actually is.
+
+Apache Kafka is a distributed, append-only log. Producers append records to the end. Consumers read records in order, tracking their own position. Records are not deleted when consumed — they stay until a retention policy, either time-based or size-based, removes them. That single design choice is why one Kafka cluster can simultaneously feed a real-time fraud detector, a nightly batch warehouse load, and a brand-new microservice that was not even written when the events landed.
+
+Here is the mental shift from a traditional message queue. A queue is destructive — once a consumer reads a message, it is gone. Kafka is non-destructive — the log is the source of truth, and consumers are just bookmarks pointing into it. And from a database, the shift is this. A database is built for random reads and updates. Kafka is built for sequential appends and sequential reads. Different shape, different physics.
+
+The cluster.
+
+Whenever Kafka runs, there are four roles in play.
+
+First, the broker. A broker is a server that stores log segments on disk and serves produce and fetch requests. A Kafka cluster is a set of brokers, typically three or more for production. Brokers are interchangeable from a client's perspective. Any broker can route a client to the right partition leader.
+
+Second, the producer. A producer is a client that appends records to a topic. This is your application code on the writing side.
+
+Third, the consumer. A consumer is a client that reads records from a topic. This is your application code on the reading side.
+
+Fourth, the controller. The controller is one elected broker that coordinates cluster-wide metadata — who leads which partition, which replicas are in-sync, what topics exist. In modern Kafka the controller is part of the broker set itself, in k-raft mode. In legacy clusters it was managed through zookeeper.
+
+The important thing to picture is that producers and consumers do not talk to each other. They both talk to the cluster, and the log is what sits between them.
+
+The append-only log.
+
+Every Kafka partition is, on disk, an append-only file. New records go to the end. Each record gets a monotonically increasing offset — zero, one, two, three, and so on — assigned when it lands. Reads start at an offset and stream forward sequentially.
+
+Three things fall out of this choice.
+
+Sequential disk I O is fast. A single modern disk can sustain hundreds of megabytes per second of sequential writes. Random I O would be a hundred times slower. Kafka is fast because it picked the workload pattern the hardware was already good at.
+
+Reads do not interfere with writes. Consumers sit at different positions in the log and never block each other or the producer. The operating system's page cache serves recent reads from ram without Kafka having to manage a cache itself.
+
+And replay is trivial. Want a new consumer to reprocess last week's data? Start from offset zero. The log does not care.
+
+Topics, partitions, offsets.
+
+These three nouns shape the whole ay-pee-eye.
+
+A topic is a named stream of records, like payments or clicks. Producers write to it, consumers read from it.
+
+A partition is one of the pieces a topic is split into. Each partition is an independent append-only log living on a specific broker. Partitions are the unit of parallelism — more partitions means more consumers can read in parallel.
+
+An offset is the position of a record within a partition. It is unique only inside its partition. Offset five in partition zero and offset five in partition one are different records.
+
+Here is the ordering rule you must remember. Kafka guarantees ordering within a partition, not across partitions. If two records must be processed in the order they were produced, they must land on the same partition. The producer controls that by choosing a record key — records with the same key always hash to the same partition. No key, and the producer picks a partition round-robin, and ordering across the topic is not guaranteed.
+
+For a payments topic, a natural key is customer I D — every payment for the same customer ends up on the same partition, in order, and one consumer can process that customer's history sequentially.
+
+Replication, leaders, followers, and the in-sync replicas.
+
+A single disk fails. To survive that, each partition is replicated across multiple brokers. The replication factor is the number of copies. Three is the common production choice.
+
+Among the replicas, one is the leader. All produce and fetch traffic for that partition goes through the leader. The other replicas are followers. They continuously pull from the leader and stay in step.
+
+The in-sync replicas set, often shortened to I S R, is the subset of replicas currently caught up with the leader. If a follower falls more than the configured replica lag time behind, it is removed from the in-sync set. When the leader dies, a new leader is elected from the in-sync set. So a record is only safe once it has been written to all replicas in the in-sync set.
+
+The producer setting acks equals all, covered in notebook two, means do not acknowledge a write until every in-sync replica has it. Combined with a broker-level minimum in-sync replicas of two, you get the standard durable-write recipe. A write that returns successfully has survived at least two replicas, so a single broker death cannot lose it.
+
+The controller, and the shift from zookeeper to k-raft.
+
+Somebody has to decide which broker leads partition zero of payments, what to do when broker two disappears, and how the cluster agrees on its own membership. That somebody is the controller.
+
+There are two generations of how Kafka handles this.
+
+The legacy generation is zookeeper mode. Cluster metadata lived in an external zookeeper ensemble — a separate distributed system you also had to operate. One broker was elected controller and synced state through zookeeper. This worked, but it meant two clusters to monitor, two failure domains, and a metadata bottleneck that limited how many partitions one cluster could host.
+
+The modern generation is k-raft mode. Kafka uses its own raft-based consensus protocol — k-raft, short for Kafka raft — to manage metadata internally. A small group of brokers, typically three or five, play the controller quorum role alongside their normal broker duties. No external system, faster failover, and clusters can scale to millions of partitions.
+
+K-raft became production-ready in Kafka three point three, released in twenty twenty-two. Kafka four point zero removes zookeeper entirely. If you are spinning up a new cluster today, it is k-raft. And the exam expects you to know the difference and the direction of travel.
+
+Hosting options.
+
+How a cluster actually shows up in your environment.
+
+Self-managed Apache Kafka means running brokers on your own virtual machines, containers, or kubernetes. Maximum control, maximum operational cost.
+
+Amazon M S K — managed streaming for Kafka — is the AWS offering. AWS runs the brokers and the controller quorum. You point clients at a bootstrap endpoint. There is also M S K Serverless, which hides broker count entirely and charges per throughput.
+
+Confluent Cloud is the commercial managed offering from Confluent, the company founded by Kafka's original creators. It includes schema registry, Kafka connect, and ksqlDB as managed services on top.
+
+Redpanda is a drop-in Kafka-ay-pee-eye-compatible engine written in C plus plus instead of java. No java virtual machine, no separate zookeeper. Different implementation, same protocol. The clients in this notebook would work unchanged against Redpanda.
+
+For learning, a single broker in docker is plenty. For the exam, you should at minimum recognize each name.
+
+When not to use Kafka.
+
+Before standing up a cluster, a word on when Kafka is the wrong tool.
+
+First, when you have one producer and one consumer. A direct H T T P call or a database table is simpler. Kafka earns its complexity when fan-out, decoupling, or durability across services starts to hurt.
+
+Second, when you need request-response semantics. Kafka is fire-and-forget on the producer side and pull-based on the consumer side. Use g r p c or rest for synchronous calls.
+
+Third, when your records are huge. Kafka is tuned for records in the kilobyte range. Multi-megabyte payloads are technically allowed but bad citizens. Store the payload in object storage like S three or G C S, and put a pointer record on the topic.
+
+Fourth, when you need a transactional database. Kafka has transactions, but they are scoped to atomic produce-plus-offset-commit across topics. They are not a substitute for full database transactions over arbitrary mutable state. Reach for postgres.
+
+Fifth, when you need sub-millisecond, single-record lookups by key. Kafka is a log, not a key-value store. Pair it with redis, rocks D B, or a database for that access pattern.
+
+The honest rule: Kafka earns its complexity when you have multiple independent consumers of the same event stream, or when durable buffering between services starts solving more problems than it creates.
+
+Setup, and your first Kafka client.
+
+To run the notebook locally, run a single-broker Kafka cluster in docker. Then install the confluent-kafka client. The version pinned in this series is two point five point three.
+
+The confluent-kafka package is a thin Python wrapper around librdkafka, the C client maintained by Confluent. It is the recommended Python client — faster and more feature-complete than the older pure-Python kafka-python package.
+
+The pattern is what every notebook in the series uses. Configure a bootstrap server, build a client, do work. The bootstrap server is the initial address the client connects to. From there, the client discovers the rest of the cluster on its own. You only need to list one or two brokers in the bootstrap setting, not all of them.
+
+Hello Kafka.
+
+The minimum loop end to end. Three steps. Use the admin client to create a small demo topic with three partitions. Use the producer to send a handful of keyed records. Use the consumer to read them back, printing the partition and offset each record landed on.
+
+Watch the partition column in the consumer output. Records with the same customer I D key consistently land on the same partition, while different keys spread across partitions zero through two.
+
+Ordering guarantees, in one place.
+
+It is worth stating the rules in one block so you can carry them as a checklist.
+
+Within a partition, records are strictly ordered by offset, both on disk and as delivered to consumers. Always.
+
+Across partitions of the same topic, there is no ordering guarantee. Two records produced in quick succession to different partitions may be consumed in either order.
+
+With a key, records with the same key always go to the same partition, assuming the default partitioner and that the partition count has not changed since the records were produced. So same-key records are strictly ordered.
+
+Without a key, the producer round-robins across partitions, and ordering across the topic is not guaranteed.
+
+After a partition count change, the key-to-partition mapping changes. Records produced before the change and records produced after may live on different partitions even for the same key. Adding partitions to a keyed topic breaks per-key ordering for any key that moves.
+
+The design implication is this. Choose the key for what you need to order by. For payments, key on customer I D so each customer's history is ordered. For clicks, key on session I D if you need clickstream order per session.
+
+Delivery semantics.
+
+Every messaging system has to answer one question. If something fails between producing and consuming, what do we promise about each record? Kafka gives you three settings, tunable end to end.
+
+At most once. Records may be lost, but never duplicated. The producer fires and forgets. The consumer commits its offset before processing. This is rare in practice — almost nobody wants silent data loss.
+
+At least once. Records are never lost, but may be delivered more than once after a retry or a consumer crash. This is the default behavior. Downstream code must be idempotent — re-processing the same record twice must yield the same result. This is the workhorse mode.
+
+Exactly once. Each record is processed exactly once, even with broker, producer, or consumer failures. This requires the idempotent producer plus transactions plus a transaction-aware consumer using the read-committed isolation level. It is strict, but more expensive and more constrained.
+
+Notebook two covers the producer side — idempotence, the acks setting, and transactions. Notebook three covers the consumer side — offset commits, rebalances, and the isolation level. For now, the takeaway is this. At-least-once with idempotent downstream code is the default. Exactly-once is opt-in for the cases that need it.
+
+What is next.
+
+This notebook set the vocabulary. Brokers, partitions, offsets, replicas, the in-sync set, k-raft, and the at-least-once default.
+
+From here the curriculum drills into each surface. Notebook two covers producers — keys, partitioners, the acks setting, idempotence, transactions, batching and linger, and compression. Notebook three covers consumers and consumer groups — groups and rebalancing, offset commits, the auto offset reset setting, assignment strategies, and the read-committed isolation level. Notebook four covers topics, partitions, and storage — sizing partition counts, retention policy, log compaction, and the segment files on disk.
+
+Every later notebook assumes you can answer four questions. What is a partition. What is an offset. What is the in-sync set. And what does Kafka order? If those land, the rest is mechanism.
