@@ -1,0 +1,169 @@
+Topics, partitions, and storage.
+
+What is covered. This notebook walks through topic naming conventions that age well, how to size the partition count and why that decision sticks, retention policies for time and size, the cleanup policy of delete versus compact, how log compaction actually works including tombstones, segments on disk and the file trio of log, index, and time-index, replication factor combined with minimum in-sync replicas as the durability recipe, rack awareness for surviving availability-zone failures, tiered storage from Kafka three point six onward, the admin client surface, and a list of common gotchas.
+
+Topic naming.
+
+Topic names live forever once consumers depend on them. So spend a minute on the convention before you create the first one. Three things to nail down up front.
+
+Use a delimiter consistently — either a dot or an underscore. The dot is the most common choice. Kafka itself uses double underscore as a reserved prefix for internal topics like consumer-offsets. Avoid mixing dots and underscores in the same name. Kafka metrics munge both into the same form, which causes monitoring collisions.
+
+Encode the producer, entity, and event in the name. Something like domain dot entity dot event. For example, payments dot transaction dot created, or orders dot order dot cancelled. This survives reorganization better than naming by team or system.
+
+And version in the name, not the payload. For example, payments dot transaction dot created dot v one. When the schema breaks compatibility, run v one and v two side by side for the migration window. Versioning inside the record forces every consumer to handle every version forever.
+
+Length cap is two hundred forty-nine characters. Allowed characters are ASCII letters, digits, dots, underscores, and dashes. No spaces, no slashes.
+
+Sizing the partition count.
+
+Partition count is the single hardest topic design choice. Three forces push in opposite directions.
+
+More partitions means more parallelism. Each partition can be read by exactly one consumer per group. Six partitions cap your consumer group at six in-parallel readers. Twelve partitions let you scale to twelve. Pick a number that is at least the largest consumer group you ever expect, including future ones.
+
+More partitions also means more overhead. Each partition is a set of open files on every replica, a queue in the producer's accumulator, a tracked offset in the consumer-offsets topic, and a metadata entry on the controller. A cluster with one million partitions is a real number you can scale to with k-raft, but it is not free. Leader elections take longer, request batching gets worse, controller failover slows down.
+
+And partitions can be added but not without breaking things. Adding partitions to an existing topic is a one-line admin call, but the key-to-partition hash changes for some keys, so per-key ordering is broken for those keys going forward. You cannot reduce partition count at all. A topic with too many partitions is permanent until you create a new topic and migrate.
+
+The rule of thumb is this. Size for peak throughput plus headroom, then do not add more. A common starting heuristic. Partition count equals the maximum of two things — target throughput divided by per-partition throughput, and peak consumer count.
+
+Per-partition throughput on commodity hardware is roughly ten to fifty megabytes per second sustained. It varies wildly with record size, compression, and disk. For most application topics, twelve to twenty-four partitions is enough. For firehose topics like clickstream or internet-of-things, the count climbs. Spend more time getting this right at topic creation than fixing it later.
+
+Setup.
+
+Same broker as before. We will create a few new topics with explicit configs to demonstrate retention, compaction, and the admin A-P-I.
+
+Retention.
+
+Kafka keeps records around until a retention policy removes them. Two knobs, evaluated independently per partition, whichever fires first wins.
+
+Retention milliseconds, defaulting to seven days, is the maximum age of a record before it is eligible for deletion.
+
+Retention bytes, defaulting to negative one which means unlimited, is the maximum total bytes per partition before old segments are deleted.
+
+Retention is enforced at the segment level, not the record level. Kafka deletes whole segment files when their newest record crosses the threshold, so you will see records persist a bit past the strict deadline — until the segment they live in fully ages out. The segment roll knobs, called segment milliseconds and segment bytes, indirectly control how tight the deletion granularity is.
+
+Setting retention milliseconds to negative one disables time retention entirely. Records stay forever, or until size retention kicks in. This is useful for compacted topics, covered next, where the retention story is replaced by deduplication.
+
+In the demo cell, we create a topic with a short five-minute retention. You would never use this in production. It is just visible enough to confirm the config landed.
+
+Cleanup policy.
+
+Two cleanup policies, and the choice between them is the shaping decision for what a topic means.
+
+Cleanup policy delete is the default. Records are deleted by retention. The topic is an event log — every record is a discrete happening, history matters, replay reconstructs the past.
+
+Cleanup policy compact means records are deduplicated by key. Only the latest value for each key is guaranteed to survive. The topic is a changelog — current state per key, with old versions garbage-collected.
+
+Cleanup policy compact comma delete means both. Compaction keeps the latest value per key within the retention window. Useful when you want current-state semantics but also a time-bounded history.
+
+The decision is about meaning, not performance. Use delete when each record is a fact and history matters, or when you want to replay a new consumer from offset zero to reconstruct history — examples are payments created, or a clicks topic. Use compact when only the latest state per key matters, or when you want a new consumer to read once and end up with current state — examples are a user profile topic, an inventory level topic, or the internal consumer-offsets topic.
+
+Kafka itself uses compacted topics for its own state. The consumer-offsets topic is compacted because only the latest committed offset per group, topic, and partition matters.
+
+Log compaction.
+
+Compaction runs as a background thread on each broker, called the log cleaner. For each compacted topic, it periodically scans old segments and rewrites them to keep only the latest value per key.
+
+Two important properties to internalize. First, offsets are preserved. A compacted partition is still strictly ordered by offset. Gaps just appear where superseded records used to be. Consumers do not see the gaps as errors. Second, the active tail segment is never compacted. Records at the very tip of the log are always kept until they age into a closed segment. So a brand-new value with the same key as an older one will coexist with it until the next compaction pass.
+
+Now, here is how you delete from a compacted topic. Producing a record with a non-null key and a null value is called a tombstone. Compaction treats it as delete this key. After delete retention milliseconds — defaulting to twenty-four hours — the tombstone itself is removed. That delay exists so consumers reading from older offsets get a chance to see the deletion before it disappears.
+
+Two tuning knobs you will see. Minimum cleanable dirty ratio, defaulting to zero point five, is the fraction of the log that must be dirty — that is, eligible-but-not-yet-compacted — before compaction runs. Lower values make compaction more aggressive, and more see-pee-you intensive. And minimum compaction lag milliseconds is the minimum age of a record before compaction can eat it. It prevents racing with consumers that have not caught up.
+
+In the demo, we create a compacted users-profile topic and produce three updates for one user, then a tombstone. A note on the demo. Compaction is asynchronous and will not necessarily fire in the seconds this notebook runs. We are showing the A-P-I surface. On a busy production topic, the log cleaner thread does its work continuously.
+
+Segments on disk.
+
+Each partition's log is split into a sequence of segments — fixed-size files on disk. A typical partition directory contains pairs of files, with two early-offset segments and one active segment being appended to.
+
+The filename of each segment is the base offset of the segment — the offset of the first record inside. Once a segment fills up, controlled by segment bytes which defaults to one gigabyte, or ages past segment milliseconds which defaults to seven days, it is closed and a new active segment starts.
+
+There are three files per segment. The dot log file holds the actual records, in produce order, with their headers, keys, values, and timestamps. The dot index file is a sparse map from offset to byte position within the log file. It lets a fetch for a given offset jump directly to roughly the right byte without scanning. And the dot timeindex file is a sparse map from timestamp to offset. It powers the offsets-for-times call from the consumer side.
+
+Why segments matter operationally. Retention and compaction operate on whole segments. Old records vanish when their segment file is deleted, or rewritten by compaction. If segment milliseconds is a week, then setting retention milliseconds to a day still keeps records up to two days, because the segment holding them will not close until its week is up. Tune segment size and retention together.
+
+Replication factor, in-sync replicas, and minimum in-sync replicas.
+
+Notebook one introduced replication. Here are the three knobs you actually set when creating a production topic.
+
+Replication factor, set per topic, is the number of copies of each partition. Three is the production standard. Two is fragile — one broker death equals a single point of failure. One is for development only.
+
+Minimum in-sync replicas, set per topic or as a broker default, is the minimum number of in-sync replicas required to accept a write when the producer uses acks all. Setting minimum in-sync replicas to two, with replication factor three, is the standard recipe. That gives you one broker of headroom. If any single broker dies, the remaining two still satisfy the minimum, and writes continue. Lose a second broker, and writes fail. The cluster preserves correctness by refusing to accept writes that would not survive a further failure.
+
+Unclean leader election enable, set at the broker level, defaults to false since Kafka two point four. It controls whether a non-in-sync replica can be elected leader if all in-sync replicas are down. Setting it to true trades data loss for availability. Setting it to false trades availability for correctness. Leave it false.
+
+The combination — replication factor three, minimum in-sync replicas two, acks all, unclean leader election false — is the standard high-durability configuration. Memorize it.
+
+Rack awareness.
+
+By default, Kafka may place all three replicas of a partition on three brokers in the same availability zone. If that availability zone goes down, the partition is offline.
+
+Rack awareness fixes this. Each broker is tagged with a broker dot rack value, typically the availability zone name like us-east-one-a, us-east-one-b, us-east-one-c. When the controller assigns replicas, it tries to spread them across distinct racks. A three-replica partition on a three-availability-zone cluster ends up with one replica per zone — surviving any single zone failure.
+
+Two notes. First, cross-availability-zone traffic costs money in AWS, GCP, and Azure. Rack awareness creates more cross-zone replication and more cross-zone fetches. Fetch from follower, configured through the replica selector class plus a matching client rack on the consumer, lets consumers read from a same-zone follower replica instead of always going to the leader. That is the main cost mitigation. Second, managed offerings like M S K and Confluent Cloud configure rack awareness for you. Self-managed clusters in cloud need to set it explicitly.
+
+Tiered storage.
+
+Historically, every byte Kafka stored sat on broker-local disks. To keep months of history, you sized the cluster for the total retained data, even though only the recent tail was actively read. Most of that disk was idle, and growing the cluster meant adding broker hardware you did not need for throughput.
+
+Tiered storage, introduced in Kafka three point six and made generally available in three point seven, splits each partition into two tiers.
+
+The local tier holds the most recent records, served from broker-local disk. Fast.
+
+The remote tier holds older records, offloaded to object storage like S three, G C S, or Azure Blob. Cheaper, effectively infinite, and slower.
+
+Consumers fetch transparently. The broker pulls from the remote tier on demand. The two knobs you set are local retention milliseconds — how long to keep records on local disk — and retention milliseconds — how long total, local plus remote.
+
+What changes for you. Massive retention becomes cheap. Years of history at S three prices, not E B S prices. Cluster sizing decouples from retention — add brokers for throughput, not storage. And replay from the remote tier is slower. A consumer reading from year-old data hits the object store, so expect tens to hundreds of milliseconds per fetch instead of single-digit milliseconds.
+
+Tiered storage is opt-in per topic. You set remote storage enable to true on the topics you want offloaded. Most application topics do not need it. Firehose topics with long retention windows do.
+
+The admin surface.
+
+The admin client is how you manage topics from code. The operations you will reach for most are these.
+
+Create topics, given a list of new-topic descriptors, creates one or more topics with partitions, replication factor, and per-topic config.
+
+Delete topics removes topics. It is asynchronous on the broker — data removal can lag.
+
+List topics gives a snapshot of cluster metadata — topics, partitions, leaders, and the in-sync set.
+
+Describe configs reads the effective configs for a topic or broker.
+
+Alter configs changes topic or broker configs. It is deprecated. Prefer the incremental variant.
+
+Incremental alter configs sets, appends, subtracts, or deletes specific config entries. Safer than the full replace.
+
+Create partitions increases a topic's partition count. It cannot decrease.
+
+Delete records deletes records up to a given offset per partition. This is used for G D P R and right-to-erasure workflows.
+
+And list offsets returns the earliest, latest, or by-timestamp offsets per partition.
+
+The demo cells read back the effective config of the topic we just created, and then snapshot the cluster metadata showing topic count, partition count, and leader count.
+
+Common gotchas.
+
+Picking partition count without thinking about consumer scaling. Add headroom. Pick the largest plausible consumer count, then a little more. Reducing partitions later is impossible without a topic migration.
+
+Segment milliseconds longer than retention milliseconds. Retention cannot take effect inside an open segment. A topic with retention milliseconds equal to one hour and segment milliseconds equal to seven days will hold records for up to a week. Set segment milliseconds less than or equal to retention milliseconds.
+
+Producing a null value to a non-compacted topic. No special meaning — it is just a record with no payload. Tombstones only matter for compacted topics.
+
+Tombstones for keys that never existed. Compaction will still keep them around for delete retention milliseconds, and consumers will see key-with-none records. Filter on the consumer side if the application does not care.
+
+Setting unclean leader election enable to true to avoid downtime. You are trading silent data loss for uptime. The exam expects you to know this is wrong by default.
+
+Same partition count across topics. Tempting for consistency, but topics have very different traffic. Size each one independently.
+
+Forgetting to create topics explicitly. Many production clusters disable auto-create. The first produce to a missing topic fails with an unknown topic error. Always create with the admin client.
+
+What is next.
+
+You now have the topic-design checklist. Name, partition count, replication factor, minimum in-sync replicas, retention, cleanup policy, and the segment knobs underneath them.
+
+Notebook five covers schema registry and serialization. Opaque-bytes is a footgun at scale. The next notebook covers Avro, protobuf, json schema, the Confluent wire format, and schema evolution rules that determine whether a topic upgrade is a non-event or an outage.
+
+Notebook six covers Kafka connect. Source connectors that pull data into Kafka, sink connectors that push it out, all running as a fleet of long-lived workers — so your application code can stop being a change-data-capture or warehouse-loader.
+
+And notebook seven covers Kafka streams. Stateful stream processing over the topics you have now designed properly.
