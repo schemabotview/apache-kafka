@@ -54,6 +54,8 @@ pip install requests==2.32.3             # 05 Schema Registry REST calls
 
 ## Topics Covered
 
+**Status: curriculum complete.** All 8 notebooks and their matching `.tts` scripts are on `main`. Audio generation runs separately via `generate_audio_colab.ipynb` (notebooks 01 and 02 have audio committed; the rest are pending a Colab run).
+
 Curriculum is **8 thematic notebooks** sized for the Confluent Certified Developer for Apache Kafka (CCDAK) exam. Each notebook opens with a **"What's covered"** bulleted lede, uses inline code cells (concept → tiny demo → next concept), and folds the relevant gotchas (rebalance storms, offset-commit pitfalls, hot partitions, ISR shrinkage) inline where they apply. ksqlDB and the full Confluent Platform admin surface are intentionally out of scope.
 
 | # | Topic | Notebook | Audio |
