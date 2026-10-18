@@ -142,6 +142,17 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | streams | `join-outputs` | two tables | `join-outputs` |
 | streams | `output-semantics` | two tables + containers | `output-semantics` |
 | streams | `testing-boundaries` | code card + table | `testing-and-boundaries` |
+| security | `trust-boundaries` | containers | `identities-and-boundaries` |
+| security | `listeners` | code card + stacked cards | `listeners-and-addresses` |
+| security | `connection-troubleshooting` | table + 2×2 cards | `connection-troubleshooting` |
+| security | `sasl-choices` | table + 2×2 cards | `sasl-mechanisms` |
+| security | `permission-matrix` | table + stacked cards | `permission-matrix` |
+| security | `acl-commands` | code card + table | `granting-acls` |
+| security | `authn-authz` | table + 2×2 cards | `which-layer-failed` |
+| security | `internal-topics-acls` | table + 2×2 cards | `internal-topic-acls` |
+| security | `quotas-tenancy` | code card + 2×2 cards | `quotas-and-ownership` |
+| security | `sensitive-data` | table + 2×2 cards | `sensitive-data` |
+| security | `credential-rotation` | table + vertical chain | `credential-rotation` |
 
 ## Invariants — do not break
 
