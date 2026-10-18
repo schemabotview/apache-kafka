@@ -98,6 +98,18 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | consumers | `bounded-concurrency` | code card + 2×2 cards | `pause-and-concurrency` |
 | consumers | `starting-offsets` | nested containers | `starting-offsets` |
 | consumers | `offset-reset` | code card + 2×2 cards | `safe-offset-reset` |
+| storage-replication | `log-segments` | nested containers | `log-segments` |
+| storage-replication | `replicas-isr` | containers + table | `leaders-followers-isr` |
+| storage-replication | `failure-matrix` | table + 2×2 cards | `durability-settings` |
+| storage-replication | `min-isr-one` | table + containers | `min-isr-default` |
+| storage-replication | `high-watermark` | table + stacked cards | `high-watermark` |
+| storage-replication | `leader-election` | containers | `leader-election` |
+| storage-replication | `availability-loss` | nested containers | `availability-or-data` |
+| storage-replication | `kraft-planes` | containers + table | `kraft-controllers` |
+| storage-replication | `quorum-loss` | table + 2×2 cards | `quorum-loss` |
+| storage-replication | `retention` | table + stacked cards | `retention-and-replay` |
+| storage-replication | `compaction` | two tables | `log-compaction` |
+| storage-replication | `compaction-timing` | table + 2×2 cards | `compaction-timing` |
 
 ## Invariants — do not break
 

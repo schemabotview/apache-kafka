@@ -2,6 +2,7 @@ import { eventsLogs } from './events-logs'
 import { partitioningContracts } from './partitioning-contracts'
 import { producers } from './producers'
 import { consumers } from './consumers'
+import { storageReplication } from './storage-replication'
 import type { Course, Section } from './types'
 
 // Course registry, in syllabus order — one course per chapter of APACHE-KAFKA-COURSE-PLAN.md.
@@ -11,6 +12,7 @@ export const COURSES: Record<string, Course> = {
   [partitioningContracts.id]: partitioningContracts,
   [producers.id]: producers,
   [consumers.id]: consumers,
+  [storageReplication.id]: storageReplication,
 }
 
 export type { Course, Section }
