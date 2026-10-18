@@ -14,7 +14,7 @@ A **record** is the unit Kafka stores and delivers. To Kafka, the key and value 
 - A **key**: here the order id, which decides the partition
 - A **value**: the event itself, often JSON or a typed schema
 - Optional **headers** for metadata, such as the source channel
-- A **timestamp**: the producer's creation time by default, or the broker's append time if the topic is set to use it
+- A **timestamp**: creation time by default, or the broker's append time
 
 ### Where it lands
 - The **topic** is named by the producer
