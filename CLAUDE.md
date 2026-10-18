@@ -110,6 +110,17 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | storage-replication | `retention` | table + stacked cards | `retention-and-replay` |
 | storage-replication | `compaction` | two tables | `log-compaction` |
 | storage-replication | `compaction-timing` | table + 2×2 cards | `compaction-timing` |
+| delivery-guarantees | `delivery-semantics` | nested containers | `delivery-semantics` |
+| delivery-guarantees | `transactions-api` | code card + containers | `kafka-transactions` |
+| delivery-guarantees | `fencing` | table + stacked cards | `zombie-fencing` |
+| delivery-guarantees | `isolation` | table + containers | `consumer-isolation` |
+| delivery-guarantees | `eos-boundary` | two columns | `exactly-once-boundary` |
+| delivery-guarantees | `payment-failures` | table + code card + containers | `external-idempotency` |
+| delivery-guarantees | `dedup-state` | code card + 2×2 cards | `deduplication-state` |
+| delivery-guarantees | `dual-write` | containers + table | `dual-write` |
+| delivery-guarantees | `outbox` | diagram | `transactional-outbox` |
+| delivery-guarantees | `retry-topics` | containers + table | `poison-records` |
+| delivery-guarantees | `replay-correctness` | table + stacked cards | `replay-correctness` |
 
 ## Invariants — do not break
 
