@@ -47,8 +47,24 @@ that reason until its first section lands.
 
 ## Scene inventory
 
-None authored yet. List each scene here as it lands: id, course, shape (diagram / code / table /
-plot), and the sections that use it.
+One row per scene: id, shape, and the section that uses it. Partition numbers in every scene are
+real: `murmur2(key) mod partitions`, as Kafka's default partitioner computes it (o-1040 → 0,
+o-1041 → 1, o-1042 → 2, o-1043 → 1, o-1047 → 0 for 3 partitions). Keep new examples consistent with
+that, or recompute.
+
+| course | scene | shape | section |
+| --- | --- | --- | --- |
+| events-logs | `event-command-state` | diagram | `events-commands-state` |
+| events-logs | `sync-vs-log` | diagram, two columns | `why-asynchronous` |
+| events-logs | `integration-styles` | 2×2 containers | `integration-styles` |
+| events-logs | `retained-log` | diagram | `reading-does-not-delete` |
+| events-logs | `record-anatomy` | two tables | `record-anatomy` |
+| events-logs | `topic-partitions` | nested containers | `topics-partitions-offsets` |
+| events-logs | `cluster-roles` | nested containers | `brokers-producers-consumers` |
+| events-logs | `quickstart-commands` | two code cards | `local-kraft-quickstart` |
+| events-logs | `first-publish-read` | two code cards | `publish-and-read` |
+| events-logs | `reader-resumes` | code card + 2×2 cards | `groups-resume` |
+| events-logs | `local-limits` | containers + code card | `local-limits` |
 
 ## Invariants — do not break
 
@@ -110,14 +126,17 @@ Levers: **add real content, not padding**; **restack** a board toward the pane's
 scene `padding` to 0.04 for boards that float, **raise** it (0.12–0.17) for tall boards that touch
 the eyebrow.
 
-These are read off the rendered route by eye — `check` models no density at all. The two ratios come
+`npm run density` (`scripts/density.mjs`) measures all four on the rendered routes; it starts its own
+Vite server, so no dev server is needed. `-- <course>` limits it to one course, `--shots <dir>` saves a
+PNG per route. A deliberately sparse board says so with `// density-accept: <reason>` in its section
+file. `check` models no density at all. The two ratios come
 from one repo's ~80 frames of diagram-and-code-card boards, so a deliberately sparse board can sit
 under them. Targets, not thresholds.
 
 ## Guards before handing over
 
 ```sh
-npm run build && npx tsc --noEmit && npm run check
+npm run build && npx tsc --noEmit && npm run check && npm run density
 ```
 
 All three are a **floor, not proof** — they pass on frames that are visually wrong. The rendered
