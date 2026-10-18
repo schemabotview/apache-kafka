@@ -1,0 +1,11 @@
+/* This repo's whole design surface — the three tokens @graphlearning/shell leaves to the repo.
+   Imported AFTER the shell's stylesheet in main.tsx, so these win the cascade.
+
+   Kafka's own mark is near-black, which disappears on the shell's dark canvas, so --brand is a
+   stream blue instead; scripts/concept.json's panelBg is anchored on the same hue so app and
+   catalog match. --accent-2 is amber, the counter tone to that blue. */
+:root {
+  --brand: #0ea5e9; /* the subject's identity colour */
+  --brand-hover: #56c0f0; /* a lighter tint — the eyebrow's hover state */
+  --accent-2: #fbbf24; /* the counter tone — the slide's `###` subheading */
+}
