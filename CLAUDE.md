@@ -131,6 +131,17 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | connect | `cdc-snapshot` | table + stacked cards | `cdc-snapshot-stream` |
 | connect | `sink-repeat` | table + 2×2 cards | `connector-guarantees` |
 | connect | `connect-or-custom` | table + stacked cards | `connect-or-custom` |
+| streams | `sales-topology` | code card + 2×2 cards | `streams-library` |
+| streams | `tasks-threads` | nested containers | `tasks-and-threads` |
+| streams | `stream-table` | table + nested tables | `stream-table-duality` |
+| streams | `repartition` | two columns | `repartitioning` |
+| streams | `state-stores` | containers + table | `state-stores` |
+| streams | `restoration` | table + 2×2 cards | `state-restoration` |
+| streams | `windows-grace` | table + stacked cards | `windows-and-grace` |
+| streams | `joins` | nested containers + stacked cards | `joins` |
+| streams | `join-outputs` | two tables | `join-outputs` |
+| streams | `output-semantics` | two tables + containers | `output-semantics` |
+| streams | `testing-boundaries` | code card + table | `testing-and-boundaries` |
 
 ## Invariants — do not break
 
