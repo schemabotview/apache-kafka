@@ -153,6 +153,17 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | security | `quotas-tenancy` | code card + 2×2 cards | `quotas-and-ownership` |
 | security | `sensitive-data` | table + 2×2 cards | `sensitive-data` |
 | security | `credential-rotation` | table + vertical chain | `credential-rotation` |
+| performance | `workload-model` | table + stacked cards | `workload-model` |
+| performance | `storage-estimate` | table + 2×2 cards | `storage-estimate` |
+| performance | `partition-planning` | table + 2×2 cards | `partition-planning` |
+| performance | `client-tradeoffs` | two tables | `client-tradeoffs` |
+| performance | `broker-evidence` | table + 2×2 cards | `broker-evidence` |
+| performance | `lag-latency` | table + stacked cards | `lag-latency-freshness` |
+| performance | `metric-charts` | two stacked plots (density-accept) | `slow-consumer-or-broker` |
+| performance | `hot-partition-lag` | table + 2×2 cards | `hot-partition-diagnosis` |
+| performance | `under-replicated` | table + stacked cards | `under-replicated-partitions` |
+| performance | `controlled-comparison` | code card + 2×2 cards | `controlled-comparisons` |
+| performance | `recovery-throughput` | table + stacked cards | `headroom-and-recovery` |
 
 ## Invariants — do not break
 

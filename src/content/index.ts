@@ -7,6 +7,7 @@ import { deliveryGuarantees } from './delivery-guarantees'
 import { connect } from './connect'
 import { streams } from './streams'
 import { security } from './security'
+import { performance } from './performance'
 import type { Course, Section } from './types'
 
 // Course registry, in syllabus order — one course per chapter of APACHE-KAFKA-COURSE-PLAN.md.
@@ -21,6 +22,7 @@ export const COURSES: Record<string, Course> = {
   [connect.id]: connect,
   [streams.id]: streams,
   [security.id]: security,
+  [performance.id]: performance,
 }
 
 export type { Course, Section }
