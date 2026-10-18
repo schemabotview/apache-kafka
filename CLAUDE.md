@@ -49,8 +49,8 @@ that reason until its first section lands.
 
 One row per scene: id, shape, and the section that uses it. Partition numbers in every scene are
 real: `murmur2(key) mod partitions`, as Kafka's default partitioner computes it (o-1040 → 0,
-o-1041 → 1, o-1042 → 2, o-1043 → 1, o-1047 → 0 for 3 partitions). Keep new examples consistent with
-that, or recompute.
+o-1041 → 1, o-1042 → 2, o-1043 → 1, o-1047 → 0, o-1050 → 1 for 3 partitions; region keys eu → 1,
+us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 
 | course | scene | shape | section |
 | --- | --- | --- | --- |
@@ -65,6 +65,17 @@ that, or recompute.
 | events-logs | `first-publish-read` | two code cards | `publish-and-read` |
 | events-logs | `reader-resumes` | code card + 2×2 cards | `groups-resume` |
 | events-logs | `local-limits` | containers + code card | `local-limits` |
+| partitioning-contracts | `topic-boundaries` | 2 containers | `topic-boundaries` |
+| partitioning-contracts | `topic-ownership` | table + containers | `topic-ownership-naming` |
+| partitioning-contracts | `key-choices` | 2×2 containers | `choosing-keys` |
+| partitioning-contracts | `hot-partition` | nested containers | `hot-keys` |
+| partitioning-contracts | `event-time` | table + containers | `order-and-event-time` |
+| partitioning-contracts | `adding-partitions` | nested containers | `adding-partitions` |
+| partitioning-contracts | `serialization` | diagram | `serialization` |
+| partitioning-contracts | `compatibility-modes` | table + code card | `compatibility` |
+| partitioning-contracts | `evolution-cases` | table + containers | `evolution-cases` |
+| partitioning-contracts | `schema-registry` | containers + table | `schema-registry` |
+| partitioning-contracts | `event-contract` | code card + 2×2 cards | `event-contract` |
 
 ## Invariants — do not break
 
@@ -99,6 +110,10 @@ breaks only on screen. Its comments carry the measured constants; the short vers
   width-proportional only), so an over-long slide **clips at the bottom** with no error.
   `check` fails over 1000 modelled design px; the band below gives the floor too. Bullets cost far
   more than prose of the same length.
+  The model runs a little HIGH: a slide modelling 930–1000 typically renders 865–960. A line within a
+  few characters of the ~53-character bullet width wraps in the model but not on screen, which is how
+  a slide can render at 0.85 and still fail `check` — reword the boundary line rather than cutting
+  content.
 - **A `focus:` that names no node in its scene is a silent no-op** — nothing lights up.
 - **`icon:` names are NOT guarded.** The engine's lucide registry is `Record<string, LucideIcon>`
   and does not enumerate its keys, so a wrong name type-checks, passes `check`, builds, and renders

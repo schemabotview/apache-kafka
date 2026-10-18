@@ -1,10 +1,12 @@
 import { eventsLogs } from './events-logs'
+import { partitioningContracts } from './partitioning-contracts'
 import type { Course, Section } from './types'
 
 // Course registry, in syllabus order — one course per chapter of APACHE-KAFKA-COURSE-PLAN.md.
 // Courses are added here as each is authored.
 export const COURSES: Record<string, Course> = {
   [eventsLogs.id]: eventsLogs,
+  [partitioningContracts.id]: partitioningContracts,
 }
 
 export type { Course, Section }
