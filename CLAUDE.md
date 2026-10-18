@@ -76,6 +76,17 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | partitioning-contracts | `evolution-cases` | table + containers | `evolution-cases` |
 | partitioning-contracts | `schema-registry` | containers + table | `schema-registry` |
 | partitioning-contracts | `event-contract` | code card + 2×2 cards | `event-contract` |
+| producers | `producer-lifecycle` | code card + 2×2 cards | `producer-lifecycle` |
+| producers | `metadata-discovery` | table + containers | `metadata-discovery` |
+| producers | `async-send` | code card + 2×2 cards | `async-send` |
+| producers | `where-errors-surface` | table + containers | `publish-errors` |
+| producers | `batching` | nested containers | `batching` |
+| producers | `throughput-latency` | table + containers | `throughput-latency` |
+| producers | `acks-levels` | table + nested containers | `acks` |
+| producers | `lost-ack` | table + containers | `lost-acknowledgement` |
+| producers | `retry-reorder` | containers | `retry-reordering` |
+| producers | `idempotent-producer` | table + containers | `idempotent-producer` |
+| producers | `business-duplicates` | table + 2×2 cards | `business-duplicates` |
 
 ## Invariants — do not break
 
