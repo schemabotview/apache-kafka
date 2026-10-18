@@ -121,6 +121,16 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | delivery-guarantees | `outbox` | diagram | `transactional-outbox` |
 | delivery-guarantees | `retry-topics` | containers + table | `poison-records` |
 | delivery-guarantees | `replay-correctness` | table + stacked cards | `replay-correctness` |
+| connect | `connect-roles` | nested containers | `connect-roles` |
+| connect | `distributed-mode` | table + stacked cards | `distributed-workers` |
+| connect | `connector-config` | code card + 2×2 cards | `connector-configuration` |
+| connect | `connect-offsets` | containers + two tables | `connect-offsets` |
+| connect | `rest-lifecycle` | code card + 2×2 cards | `rest-lifecycle` |
+| connect | `transforms` | code card + table | `single-message-transforms` |
+| connect | `error-tolerance` | table + 2×2 cards | `error-tolerance` |
+| connect | `cdc-snapshot` | table + stacked cards | `cdc-snapshot-stream` |
+| connect | `sink-repeat` | table + 2×2 cards | `connector-guarantees` |
+| connect | `connect-or-custom` | table + stacked cards | `connect-or-custom` |
 
 ## Invariants — do not break
 
@@ -168,7 +178,9 @@ breaks only on screen. Its comments carry the measured constants; the short vers
   convention: `public/audio/<course>/<section-id>.wav`.
 
 What `check` does *not* model: an edge label landing on top of a card, or whether the frame is too
-empty. Look at the route.
+empty. Look at the route. Neither it nor `density` catches **text too small to read**: a code card
+with very long lines (fully qualified class names, say) widens the board until fitView shrinks every
+glyph. Keep code lines under ~70 characters, and move long names into a table.
 
 ### Density targets — the frame must use the space it has
 
