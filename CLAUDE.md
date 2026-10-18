@@ -42,8 +42,11 @@ Files: `src/content/<course>/NN-<section-id>.ts`, `src/scenes/<course>/<scene-id
 (`npm run check` reads every entry there as a course folder).
 
 **`COURSES` must never be empty**: the shell throws `Cannot read properties of undefined (reading
-'sections')` on `#/` and renders a blank page. `events-logs` is registered with `sections: []` for
-that reason until its first section lands.
+'sections')` on `#/` and renders a blank page.
+
+All 11 courses are authored: 122 sections (scenes, slides and narration text). **No narration wavs
+exist yet** — the Colab + Chatterbox pass has not been run, so every section currently narrates
+silence, and `npm run check` will start requiring every wav in a course once its first one lands.
 
 ## Scene inventory
 
@@ -164,6 +167,18 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | performance | `under-replicated` | table + stacked cards | `under-replicated-partitions` |
 | performance | `controlled-comparison` | code card + 2×2 cards | `controlled-comparisons` |
 | performance | `recovery-throughput` | table + stacked cards | `headroom-and-recovery` |
+| operations | `topic-admin` | table + 2×2 cards | `administration-safeguards` |
+| operations | `reassignment` | code card + stacked cards | `partition-reassignment` |
+| operations | `reassignment-limits` | table + 2×2 cards | `reassignment-limits` |
+| operations | `rolling-upgrade` | table + stacked cards | `rolling-upgrade` |
+| operations | `broker-runbook` | table + containers | `failure-runbooks` |
+| operations | `recovery-evidence` | table + 2×2 cards | `recovery-evidence` |
+| operations | `mirroring` | three stacked containers | `cross-cluster-mirroring` |
+| operations | `failover-reconciliation` | table + 2×2 cards | `failover-reconciliation` |
+| operations | `rpo-rto` | table + 2×2 cards | `recovery-objectives` |
+| operations | `managed-or-self` | table + stacked cards | `managed-or-self-managed` |
+| operations | `order-architecture` | four stacked containers | `order-architecture` |
+| operations | `architecture-review` | table + card | `architecture-review` |
 
 ## Invariants — do not break
 
