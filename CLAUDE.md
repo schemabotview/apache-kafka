@@ -87,6 +87,17 @@ us → 1, apac → 2). Keep new examples consistent with that, or recompute.
 | producers | `retry-reorder` | containers | `retry-reordering` |
 | producers | `idempotent-producer` | table + containers | `idempotent-producer` |
 | producers | `business-duplicates` | table + 2×2 cards | `business-duplicates` |
+| consumers | `poll-loop` | code card + 2×2 cards | `poll-loop` |
+| consumers | `positions` | 2×2 cards + table | `positions-and-commits` |
+| consumers | `commit-windows` | table + 2×2 cards | `commit-crash-windows` |
+| consumers | `explicit-commit` | code card + 2×2 cards | `explicit-commits` |
+| consumers | `group-assignment` | nested containers | `group-assignment` |
+| consumers | `rebalance` | table + containers | `rebalances` |
+| consumers | `group-protocols` | table + 2×2 cards | `group-protocols` |
+| consumers | `liveness` | nested containers + table | `liveness` |
+| consumers | `bounded-concurrency` | code card + 2×2 cards | `pause-and-concurrency` |
+| consumers | `starting-offsets` | nested containers | `starting-offsets` |
+| consumers | `offset-reset` | code card + 2×2 cards | `safe-offset-reset` |
 
 ## Invariants — do not break
 
